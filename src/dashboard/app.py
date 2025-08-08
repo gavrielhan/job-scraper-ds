@@ -5,23 +5,37 @@ import streamlit as st
 import plotly.express as px
 
 DATA_PATH = os.path.abspath(os.path.join(os.getcwd(), "data", "jobs.csv"))
+# Optional: override with a remote CSV for Streamlit Cloud (e.g., raw GitHub)
+DEFAULT_REMOTE_CSV = "https://raw.githubusercontent.com/gavrielhan/job-scraper-ds/main/data/jobs.csv"
+REMOTE_CSV = os.environ.get("DASHBOARD_DATA_URL", DEFAULT_REMOTE_CSV)
+# Only show local fetch button if explicitly enabled
+ENABLE_FETCH = os.environ.get("ENABLE_FETCH_BUTTON", "").strip().lower() in {"1", "true", "yes", "on"}
 
 st.set_page_config(page_title="Data Scientist Jobs in Israel", layout="wide")
 st.title("Data Scientist Jobs in Israel")
 st.caption("Interactive dashboard of open positions over time")
 
 @st.cache_data(ttl=600)
-def load_data(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=["source", "job_title", "company", "department", "location", "url", "collected_at"])
-    df = pd.read_csv(path)
+def load_data(path: str, remote_url: str) -> pd.DataFrame:
+    # Try local file first
+    if os.path.exists(path):
+        df = pd.read_csv(path)
+    else:
+        # Fallback to remote CSV (raw GitHub)
+        try:
+            df = pd.read_csv(remote_url)
+        except Exception:
+            return pd.DataFrame(columns=["source", "job_title", "company", "location", "url", "collected_at"])
     if "collected_at" in df.columns:
         df["collected_at"] = pd.to_datetime(df["collected_at"]).dt.date
-    return df
+    # Ensure expected columns exist
+    for c in ["source", "job_title", "company", "location", "url", "collected_at"]:
+        if c not in df.columns:
+            df[c] = None
+    return df[["source", "job_title", "company", "location", "url", "collected_at"]]
 
 
 def trigger_fetch():
-    # Increase temp max to 125 via env and run scraper
     os.environ["LINKEDIN_MAX_JOBS"] = "125"
     exit_code = os.system("python -m src.job_scraper.runner")
     if exit_code == 0:
@@ -33,10 +47,11 @@ def trigger_fetch():
 
 with st.sidebar:
     st.header("Filters")
-    if st.button("Fetch more now"):
-        trigger_fetch()
+    if ENABLE_FETCH:
+        if st.button("Fetch more now (+100)"):
+            trigger_fetch()
 
-    df = load_data(DATA_PATH)
+    df = load_data(DATA_PATH, REMOTE_CSV)
     sources = sorted(df["source"].dropna().unique().tolist())
     selected_sources = st.multiselect("Source", options=sources, default=sources)
 
@@ -70,4 +85,4 @@ if not filtered.empty:
     latest = filtered[filtered["collected_at"] == latest_date].sort_values(["company", "job_title"]).reset_index(drop=True)
     st.dataframe(latest, use_container_width=True, hide_index=True)
 else:
-    st.info("No data yet. Run the scraper to populate jobs.csv.") 
+    st.info("No data yet. Ensure data/jobs.csv exists in the repo or set DASHBOARD_DATA_URL to a CSV.") 
