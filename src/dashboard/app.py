@@ -33,7 +33,7 @@ def trigger_fetch():
 
 with st.sidebar:
     st.header("Filters")
-    if st.button("Fetch more now (+100)"):
+    if st.button("Fetch more now"):
         trigger_fetch()
 
     df = load_data(DATA_PATH)

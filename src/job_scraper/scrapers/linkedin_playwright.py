@@ -11,20 +11,27 @@ from .base import ScraperBase
 
 
 def _normalize_title(title: str) -> str:
-    t = " ".join(title.split())
+    t = " ".join((title or "").split())
+    if not t:
+        return t
+    tokens = t.split(" ")
+    # Remove any leading duplicated phrase (e.g., X Y X Y [rest] -> X Y [rest])
+    changed = True
+    while changed and len(tokens) >= 2:
+        changed = False
+        max_k = len(tokens) // 2
+        for k in range(max_k, 0, -1):
+            if tokens[:k] == tokens[k:2 * k]:
+                tokens = tokens[:k] + tokens[2 * k:]
+                changed = True
+                break
     # Collapse consecutive duplicate words
-    words = t.split(" ")
-    dedup_words: List[str] = []
-    for w in words:
-        if not dedup_words or dedup_words[-1].lower() != w.lower():
-            dedup_words.append(w)
-    t = " ".join(dedup_words)
-    # Remove exact duplicated phrase (e.g., "X Y X Y" -> "X Y")
-    half = len(dedup_words) // 2
-    if half >= 1 and dedup_words[:half] == dedup_words[half:2 * half]:
-        t = " ".join(dedup_words[:half]) + (" " + " ".join(dedup_words[2 * half:]) if len(dedup_words) > 2 * half else "")
-        t = t.strip()
-    # Specific cleanups
+    dedup: List[str] = []
+    for w in tokens:
+        if not dedup or dedup[-1].lower() != w.lower():
+            dedup.append(w)
+    t = " ".join(dedup)
+    # Specific cleanup
     t = re.sub(r"\s+with verification\b", "", t, flags=re.IGNORECASE).strip()
     return t
 
@@ -110,27 +117,7 @@ class LinkedInPlaywrightScraper(ScraperBase):
                 while len(jobs) < self.max_jobs and load_iterations < 30:
                     job_cards = page.query_selector_all(probe_selectors)
                     for card in job_cards:
-                        try:
-                            title_el = (
-                                card.query_selector(".base-search-card__title")
-                                or card.query_selector(".job-card-list__title")
-                                or card.query_selector(".job-card-container__link")
-                            )
-                            if not title_el:
-                                continue
-                            title_raw = title_el.inner_text().strip()
-                            title = _normalize_title(title_raw)
-                        except Exception:
-                            continue
-                        company_el = (
-                            card.query_selector(".base-search-card__subtitle a")
-                            or card.query_selector(".job-card-container__company-name")
-                            or card.query_selector(".base-search-card__subtitle")
-                            or card.query_selector(".job-card-container__primary-description")
-                        )
-                        company = company_el.inner_text().strip() if company_el else ""
-                        if company.lower() == "none":
-                            company = ""
+                        # Read link first for dedupe and validity
                         link_el = (
                             card.query_selector("a.base-card__full-link")
                             or card.query_selector("a.job-card-list__title")
@@ -143,28 +130,62 @@ class LinkedInPlaywrightScraper(ScraperBase):
                             url = f"https://www.linkedin.com{url}"
                         if "linkedin.com" not in url.lower():
                             continue
-
-                        # Fallback: click card to read detail panel for accurate title/company
-                        if (not company) or (len(title_raw.split()) >= 2 and title_raw.strip().lower() in (title.strip().lower() + " " + title.strip().lower())):
-                            try:
-                                card.click()
-                                page.wait_for_timeout(500)
-                                detail_title = page.query_selector("h1.jobs-unified-top-card__job-title, h1.topcard__title")
-                                if detail_title:
-                                    title = _normalize_title(detail_title.inner_text().strip()) or title
-                                detail_company = page.query_selector("a.jobs-unified-top-card__company-name, a.topcard__org-name-link, .jobs-unified-top-card__company-name")
-                                if detail_company:
-                                    company = (detail_company.inner_text().strip() or company)
-                            except Exception:
-                                pass
-
                         if url in seen_links:
                             continue
+
+                        # Open the card to read canonical title and company from the detail panel
+                        try:
+                            card.click()
+                            page.wait_for_timeout(500)
+                        except Exception:
+                            pass
+                        title = None
+                        company = None
+                        try:
+                            detail_title = page.query_selector("h1.jobs-unified-top-card__job-title, h1.topcard__title")
+                            if detail_title:
+                                title = _normalize_title(detail_title.inner_text().strip())
+                        except Exception:
+                            pass
+                        try:
+                            detail_company = page.query_selector("a.jobs-unified-top-card__company-name, a.topcard__org-name-link, .jobs-unified-top-card__company-name")
+                            if detail_company:
+                                company = (detail_company.inner_text().strip() or None)
+                        except Exception:
+                            pass
+
+                        # Fallbacks from card list if needed
+                        if not title:
+                            try:
+                                title_el = (
+                                    card.query_selector(".base-search-card__title")
+                                    or card.query_selector(".job-card-list__title")
+                                    or card.query_selector(".job-card-container__link")
+                                )
+                                if title_el:
+                                    title = _normalize_title(title_el.inner_text().strip())
+                            except Exception:
+                                pass
+                        if not company:
+                            try:
+                                company_el = (
+                                    card.query_selector(".base-search-card__subtitle a")
+                                    or card.query_selector(".job-card-container__company-name")
+                                    or card.query_selector(".base-search-card__subtitle")
+                                    or card.query_selector(".job-card-container__primary-description")
+                                )
+                                if company_el:
+                                    company = company_el.inner_text().strip()
+                            except Exception:
+                                pass
+                        if company and company.lower() == "none":
+                            company = None
+
                         seen_links.add(url)
                         jobs.append(
                             JobPosting(
                                 source="LinkedIn (Playwright)",
-                                job_title=title,
+                                job_title=title or "",
                                 company=company or "",
                                 location=self.location,
                                 url=url,
