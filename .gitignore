@@ -27,8 +27,8 @@ venv/
 .idea/
 
 # Data
-/data/
-*.csv
+/data/*
+!/data/jobs.csv
 *.parquet
 
 # Streamlit
