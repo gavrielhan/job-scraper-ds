@@ -29,6 +29,7 @@ venv/
 # Data
 /data/*
 !/data/jobs.csv
+!/data/jobs_enriched.csv
 *.parquet
 
 # Streamlit
