@@ -15,6 +15,11 @@ def _normalize_title(title: str) -> str:
     t = " ".join((title or "").split())
     if not t:
         return t
+    # Collapse exact duplicated phrase (with or without whitespace between repeats)
+    # e.g., "Junior Data AnalystJunior Data Analyst" or "Title Title"
+    m = re.match(r"^(?P<p>.+?)(?:\s*\1)+$", t, flags=re.IGNORECASE)
+    if m:
+        t = m.group("p").strip()
     tokens = t.split(" ")
     changed = True
     while changed and len(tokens) >= 2:

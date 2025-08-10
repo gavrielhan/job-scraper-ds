@@ -1,26 +1,16 @@
 source,job_title,company,location,url,collected_at
-LinkedIn (Playwright),"Data Scientist, Professional Services Israel",Amazon Web Services (AWS),"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4226310730/,2025-08-10
-LinkedIn (Playwright),Data Scientist / ML & AI Engineer,Appdome,Israel,https://www.linkedin.com/jobs/view/4266313539/,2025-08-10
-LinkedIn (Playwright),Junior Data Analyst,Axon Pulse,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4267142246/,2025-08-10
-LinkedIn (Playwright),Data Scientist,Bigabid,Israel,https://www.linkedin.com/jobs/view/4281377348/,2025-08-10
-LinkedIn (Playwright),Data Scientist,Cato Networks,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4257185188/,2025-08-10
-LinkedIn (Playwright),Machine Learning Engineer,DRW,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4020355994/,2025-08-10
-LinkedIn (Playwright),AI Engineer- R&D and Innovation Center,Deloitte,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4237191212/,2025-08-10
-LinkedIn (Playwright),Data Scientist Engineer,Fetcherr,Israel,https://www.linkedin.com/jobs/view/4280419298/,2025-08-10
-LinkedIn (Playwright),Artificial Intelligence Consultant,Geffen Global,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4280664569/,2025-08-10
-LinkedIn (Playwright),Data Scientist,HCL AppScan,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4254997937/,2025-08-10
-LinkedIn (Playwright),Machine Learning Engineer,IRONSCALES,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4282949280/,2025-08-10
-LinkedIn (Playwright),Data Scientist,Nexxen,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4280169137/,2025-08-10
-LinkedIn (Playwright),AI Engineer,Root,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4271186820/,2025-08-10
-LinkedIn (Playwright),Machine Learning Engineer,Teads,Israel,https://www.linkedin.com/jobs/view/4266957612/,2025-08-10
-LinkedIn (Playwright),Machine Learning Engineer,Teads,"Netanya, Center District, Israel",https://www.linkedin.com/jobs/view/4266957613/,2025-08-10
+LinkedIn (Playwright),Data Scientist,Bigabid,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4281377348/,2025-08-10
+LinkedIn (Playwright),Data Scientist / ML & AI Engineer,Appdome,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4266313539/,2025-08-10
+LinkedIn (Playwright),Data Scientist Engineer,Fetcherr,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4282966098/,2025-08-10
 LinkedIn (Playwright),Junior Data Analyst,Thing or Two,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4271822346/,2025-08-10
+LinkedIn (Playwright),Machine Learning Engineer,Millennium,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4254635063/,2025-08-10
 LinkedIn (Playwright),Bioinformatics Scientist,"Veracyte, Inc.",Israel,https://www.linkedin.com/jobs/view/4275258639/,2025-08-10
-Greenhouse,Creative AI Specialist,lightricks,Jerusalem,https://careers.lightricks.com/position?gh_jid=8019189002&gh_jid=8019189002,2025-08-10
-Greenhouse,Maintenance Manager,lightricks,Jerusalem,https://careers.lightricks.com/position?gh_jid=7826535002&gh_jid=7826535002,2025-08-10
-Greenhouse,Product AI Lab Team Lead,lightricks,Jerusalem,https://careers.lightricks.com/position?gh_jid=8050035002&gh_jid=8050035002,2025-08-10
-Greenhouse,"Senior Developer Advocate, GenAI",lightricks,Jerusalem,https://careers.lightricks.com/position?gh_jid=8030072002&gh_jid=8030072002,2025-08-10
-Greenhouse,User Acquisition Team Lead - Paid Social,lightricks,Jerusalem,https://careers.lightricks.com/position?gh_jid=7982830002&gh_jid=7982830002,2025-08-10
+LinkedIn (Playwright),Data Scientist,Similarweb,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4218607296/,2025-08-10
+LinkedIn (Playwright),Machine Learning Researcher - Student Position,eSelf AI,"Petah Tikva, Center District, Israel",https://www.linkedin.com/jobs/view/4266418351/,2025-08-10
+LinkedIn (Playwright),"Data Scientist, Professional Services Israel",Amazon Web Services (AWS),"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4226310730/,2025-08-10
+LinkedIn (Playwright),Data Engineer,Explorium,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4281352321/,2025-08-10
+LinkedIn (Playwright),Machine Learning Engineer,DRW,"Tel Aviv, Israel",https://www.linkedin.com/jobs/view/4020355994/,2025-08-10
+LinkedIn (Playwright),Deep Learning Algorithm Developer - Road Team,Mobileye,"Jerusalem, Israel",https://www.linkedin.com/jobs/view/4273750096/,2025-08-10
 Greenhouse,AI Backend Engineer,similarweb,Tel Aviv-Yafo,https://job-boards.greenhouse.io/similarweb/jobs/7139830,2025-08-10
 Greenhouse,AI Engineer,similarweb,Tel Aviv-Yafo,https://job-boards.greenhouse.io/similarweb/jobs/7135356,2025-08-10
 Greenhouse,Data Scientist,similarweb,"Tel Aviv-Yafo, Israel",https://job-boards.greenhouse.io/similarweb/jobs/6829705,2025-08-10
@@ -30,3 +20,8 @@ Greenhouse,Paid Social Campaign Manager,taboola,"Tel Aviv, Israel",https://www.t
 Greenhouse,Senior Data Scientist,taboola,"Tel Aviv, Israel",https://www.taboola.com/careers/job/6717217?gh_jid=6717217,2025-08-10
 Greenhouse,Senior GenAI Machine Learning Engineer/Scientist,taboola,"Tel Aviv, Israel",https://www.taboola.com/careers/job/6990916?gh_jid=6990916,2025-08-10
 Greenhouse,Senior Machine Learning Engineer,taboola,"Tel Aviv, Israel",https://www.taboola.com/careers/job/6717221?gh_jid=6717221,2025-08-10
+Greenhouse,Creative AI Specialist,lightricks,Jerusalem,https://careers.lightricks.com/position?gh_jid=8019189002&gh_jid=8019189002,2025-08-10
+Greenhouse,Maintenance Manager,lightricks,Jerusalem,https://careers.lightricks.com/position?gh_jid=7826535002&gh_jid=7826535002,2025-08-10
+Greenhouse,Product AI Lab Team Lead,lightricks,Jerusalem,https://careers.lightricks.com/position?gh_jid=8050035002&gh_jid=8050035002,2025-08-10
+Greenhouse,"Senior Developer Advocate, GenAI",lightricks,Jerusalem,https://careers.lightricks.com/position?gh_jid=8030072002&gh_jid=8030072002,2025-08-10
+Greenhouse,User Acquisition Team Lead - Paid Social,lightricks,Jerusalem,https://careers.lightricks.com/position?gh_jid=7982830002&gh_jid=7982830002,2025-08-10
