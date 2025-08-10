@@ -56,11 +56,10 @@ class GreenhouseScraper(ScraperBase):
                 if location and not _looks_israel(location):
                     continue
                 url = (job.get("absolute_url") or "").strip()
-                # Company from board/company field
                 company = (job.get("company", {}).get("name") or board).strip()
                 results.append(
                     JobPosting(
-                        source=f"Greenhouse:{board}",
+                        source="Greenhouse",
                         job_title=title,
                         company=company or board,
                         location=location or "Israel",

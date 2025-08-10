@@ -73,6 +73,34 @@ col1.metric("Total postings", len(filtered))
 col2.metric("Unique companies", filtered["company"].nunique())
 col3.metric("Snapshots", filtered["collected_at"].nunique())
 
+# Distribution charts (locations % and titles pie)
+if not filtered.empty:
+    dist_col1, dist_col2 = st.columns(2)
+
+    # Location percentages
+    loc_series = filtered["location"].fillna("Unknown")
+    loc_counts = loc_series.value_counts(dropna=False).reset_index()
+    loc_counts.columns = ["location", "count"]
+    loc_counts["percent"] = (loc_counts["count"] / loc_counts["count"].sum() * 100).round(1)
+    loc_counts["percent_label"] = loc_counts["percent"].astype(str) + "%"
+    fig_loc = px.bar(loc_counts, x="location", y="percent", text="percent_label", title="Locations (% of filtered)")
+    fig_loc.update_yaxes(title="Percent", range=[0, 100])
+    fig_loc.update_layout(xaxis_title="Location", yaxis_ticksuffix="%", uniformtext_minsize=10, uniformtext_mode="hide")
+    dist_col1.plotly_chart(fig_loc, use_container_width=True)
+
+    # Titles pie (top 12 + Other)
+    title_series = filtered["job_title"].fillna("Unknown")
+    title_counts = title_series.value_counts().reset_index()
+    title_counts.columns = ["job_title", "count"]
+    top_n = 12
+    if len(title_counts) > top_n:
+        top = title_counts.iloc[:top_n].copy()
+        other = pd.DataFrame([["Other", title_counts.iloc[top_n:]["count"].sum()]], columns=["job_title", "count"])
+        title_counts = pd.concat([top, other], ignore_index=True)
+    fig_titles = px.pie(title_counts, names="job_title", values="count", title="Titles distribution (filtered)")
+    dist_col2.plotly_chart(fig_titles, use_container_width=True)
+
+# Trend over time
 if not filtered.empty:
     by_day = (
         filtered.groupby("collected_at").size().reset_index(name="count").sort_values("collected_at")

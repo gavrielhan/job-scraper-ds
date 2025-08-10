@@ -56,7 +56,7 @@ class LeverScraper(ScraperBase):
                 company_name = (job.get("company") or company).strip()
                 results.append(
                     JobPosting(
-                        source=f"Lever:{company}",
+                        source="Lever",
                         job_title=title,
                         company=company_name or company,
                         location=location or "Israel",

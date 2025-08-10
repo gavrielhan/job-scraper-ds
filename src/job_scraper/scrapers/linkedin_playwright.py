@@ -34,6 +34,36 @@ def _normalize_title(title: str) -> str:
     return t
 
 
+def _normalize_location_text(raw: str) -> str:
+    if not raw:
+        return ""
+    t = " ".join(raw.replace("\n", " ").split()).strip(", ")
+    # Common variants
+    variants = {
+        "tel aviv": "Tel Aviv",
+        "tel-aviv": "Tel Aviv",
+        "tel aviv-yafo": "Tel Aviv",
+        "tel-aviv-yafo": "Tel Aviv",
+        "jerusalem": "Jerusalem",
+        "haifa": "Haifa",
+        "herzliya": "Herzliya",
+        "ra'anana": "Ra'anana",
+        "beer sheva": "Beer Sheva",
+        "be'er sheva": "Beer Sheva",
+    }
+    tl = t.lower()
+    for k, v in variants.items():
+        if k in tl:
+            t = v
+            break
+    # Append country if only city
+    if t and "israel" not in t.lower():
+        t = f"{t}, Israel"
+    # Collapse "Israel, Israel"
+    t = t.replace(", Israel, Israel", ", Israel")
+    return t
+
+
 def _extract_company_from_topcard(page) -> str:
     selectors = [
         "a.jobs-unified-top-card__company-name",
@@ -125,6 +155,119 @@ def _extract_company_from_json(page) -> str:
     except Exception:
         pass
     return ""
+
+
+def _extract_location_from_json(page) -> str:
+    # ld+json first
+    try:
+        for script in page.query_selector_all('script[type="application/ld+json"]'):
+            try:
+                data = json.loads(script.inner_text() or "{}")
+                # jobLocation can be dict or list
+                jl = data.get("jobLocation")
+                if jl:
+                    objs = jl if isinstance(jl, list) else [jl]
+                    for o in objs:
+                        addr = o.get("address") if isinstance(o, dict) else None
+                        if isinstance(addr, dict):
+                            city = (addr.get("addressLocality") or "").strip()
+                            country = (addr.get("addressCountry") or "").strip()
+                            if city:
+                                loc = city
+                                if country:
+                                    loc = f"{city}, {country}"
+                                return _normalize_location_text(loc)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # __NEXT_DATA__ fallback
+    try:
+        next_data = page.query_selector('#__NEXT_DATA__')
+        if next_data:
+            data = json.loads(next_data.inner_text() or "{}")
+            # Deep search for addressLocality
+            def deep(o):
+                if isinstance(o, dict):
+                    addr = o.get("address")
+                    if isinstance(addr, dict):
+                        city = addr.get("addressLocality")
+                        country = addr.get("addressCountry")
+                        if city:
+                            loc = city
+                            if country:
+                                loc = f"{city}, {country}"
+                            return loc
+                    for v in o.values():
+                        r = deep(v)
+                        if r:
+                            return r
+                if isinstance(o, list):
+                    for it in o:
+                        r = deep(it)
+                        if r:
+                            return r
+                return None
+            loc = deep(data)
+            if loc:
+                return _normalize_location_text(loc)
+    except Exception:
+        pass
+    return ""
+
+
+def _extract_location_from_topcard(page) -> str:
+    try:
+        # Look for bullets under subtitle grouping
+        grouping = page.query_selector(".jobs-unified-top-card__subtitle-primary-grouping")
+        if grouping:
+            text = grouping.inner_text() or ""
+            # Split by separators
+            for seg in re.split(r"[•·|]", text):
+                seg = seg.strip()
+                if seg and ("israel" in seg.lower() or len(seg.split()) <= 3):
+                    return _normalize_location_text(seg)
+        # Generic bullets
+        for sel in [".jobs-unified-top-card__bullet", ".topcard__flavor--bullet", ".topcard__flavor"]:
+            for el in page.query_selector_all(sel):
+                seg = (el.inner_text() or "").strip()
+                if seg and ("israel" in seg.lower() or len(seg.split()) <= 3):
+                    return _normalize_location_text(seg)
+    except Exception:
+        pass
+    return ""
+
+
+def _extract_location_from_guest_endpoint(context, job_url: str) -> str:
+    try:
+        m = re.search(r"/jobs/view/(\d+)/", job_url)
+        if not m:
+            return ""
+        job_id = m.group(1)
+        guest_url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
+        page = context.new_page()
+        page.set_default_timeout(20000)
+        page.goto(guest_url, timeout=20000)
+        try:
+            page.wait_for_selector(".topcard__flavor--bullet, .topcard__flavor", timeout=5000)
+        except Exception:
+            pass
+        # Collect bullet flavors and pick plausible city
+        bullets = []
+        for sel in [".topcard__flavor--bullet", ".topcard__flavor"]:
+            for el in page.query_selector_all(sel):
+                bullets.append((el.inner_text() or "").strip())
+        page.close()
+        for b in bullets:
+            if b and ("israel" in b.lower() or len(b.split()) <= 3):
+                return _normalize_location_text(b)
+        return ""
+    except Exception:
+        try:
+            page.close()
+        except Exception:
+            pass
+        return ""
 
 
 def _extract_company_from_guest_endpoint(context, job_url: str) -> str:
@@ -308,6 +451,8 @@ class LinkedInPlaywrightScraper(ScraperBase):
                         # Processed values
                         title = _normalize_title(detail_title_raw or title_raw)
                         company = (detail_company_raw or company_raw or "").strip()
+                        # Location extraction
+                        loc = _extract_location_from_json(page) or _extract_location_from_topcard(page)
 
                         # Last resort: open job URL directly
                         if not company:
@@ -324,6 +469,11 @@ class LinkedInPlaywrightScraper(ScraperBase):
                                     print(json.dumps({"debug_source":"LinkedInPlaywright","direct_open_company_raw":comp2,"url":url}, ensure_ascii=False))
                                 if comp2:
                                     company = comp2
+                                # Try location too
+                                if not loc:
+                                    loc2 = _extract_location_from_json(details_page) or _extract_location_from_topcard(details_page)
+                                    if loc2:
+                                        loc = loc2
                             except Exception:
                                 pass
                             finally:
@@ -339,6 +489,12 @@ class LinkedInPlaywrightScraper(ScraperBase):
                                 print(json.dumps({"debug_source":"LinkedInPlaywright","guest_endpoint_company_raw":comp3,"url":url}, ensure_ascii=False))
                             if comp3:
                                 company = comp3
+                        if not loc:
+                            loc3 = _extract_location_from_guest_endpoint(context, url)
+                            if self.debug:
+                                print(json.dumps({"debug_source":"LinkedInPlaywright","guest_endpoint_location_raw":loc3,"url":url}, ensure_ascii=False))
+                            if loc3:
+                                loc = loc3
 
                         seen_links.add(url)
                         jobs.append(
@@ -346,7 +502,7 @@ class LinkedInPlaywrightScraper(ScraperBase):
                                 source="LinkedIn (Playwright)",
                                 job_title=title or "",
                                 company=company or "",
-                                location=self.location,
+                                location=loc or self.location,
                                 url=url,
                                 collected_at=as_of,
                             )
