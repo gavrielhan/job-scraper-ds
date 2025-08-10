@@ -27,9 +27,12 @@ def append_postings_to_csv(postings: List[JobPosting], csv_path: str) -> None:
         existing = pd.read_csv(csv_path)
         existing = _ensure_columns(existing)
         combined = pd.concat([existing, new_df], ignore_index=True)
+        # Prefer rows that have a non-empty company for the same URL
+        combined["company_len"] = combined["company"].fillna("").astype(str).str.len()
         combined = (
-            combined.drop_duplicates(subset=["url"], keep="first")
-            .sort_values(["collected_at", "company", "job_title"])  # tidy
+            combined.sort_values(["url", "company_len", "collected_at"]).drop_duplicates(subset=["url"], keep="last")
+            .drop(columns=["company_len"])  # tidy
+            .sort_values(["collected_at", "company", "job_title"])  # final order
             .reset_index(drop=True)
         )
         combined.to_csv(csv_path, index=False)

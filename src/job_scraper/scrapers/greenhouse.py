@@ -56,19 +56,13 @@ class GreenhouseScraper(ScraperBase):
                 if location and not _looks_israel(location):
                     continue
                 url = (job.get("absolute_url") or "").strip()
-                # Company from board/company field; department separately
+                # Company from board/company field
                 company = (job.get("company", {}).get("name") or board).strip()
-                departments = job.get("departments") or []
-                department = None
-                if isinstance(departments, list) and departments:
-                    # Take first department name if exists
-                    department = (departments[0].get("name") or None)
                 results.append(
                     JobPosting(
                         source=f"Greenhouse:{board}",
                         job_title=title,
                         company=company or board,
-                        department=department,
                         location=location or "Israel",
                         url=url or f"https://boards.greenhouse.io/{board}",
                         collected_at=as_of,

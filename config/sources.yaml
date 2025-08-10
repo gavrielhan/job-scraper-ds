@@ -1,7 +1,7 @@
 # Toggle sources here. Add/change companies as needed.
 
 linkedin_serpapi:
-  enabled: false
+  enabled: true
   query: "Data Scientist"
   location: "Israel"
 
@@ -21,23 +21,39 @@ linkedin_playwright:
 
 # Greenhouse boards API, no API key needed
 # Use the company board slug from https://boards.greenhouse.io/<slug>
-# Examples below are known to be valid at time of writing.
+# Examples below are known or best-effort and skipped if not found.
 greenhouse:
-  enabled: false
-  title_keywords: ["data scientist", "machine learning", "ml engineer"]
+  enabled: true
+  title_keywords: ["data scientist", "machine learning", "ml engineer", "ai"]
   companies:
     - lemonade
     - riskified
     - fiverr
     - appsflyer
     - similarweb
+    - taboola
+    - wix
+    - monday
+    - mondaydotcom
+    - meliopayments
+    - rapyd
+    - redis
+    - redis-labs
+    - lightricks
+    - playtika
+    - orcam
+    - walkme
 
 # Lever postings API, no API key needed
 # Use company slug from https://jobs.lever.co/<slug>
 lever:
-  enabled: false
-  title_keywords: ["data scientist", "machine learning", "ml engineer"]
+  enabled: true
+  title_keywords: ["data scientist", "machine learning", "ml engineer", "ai"]
   companies:
     - via
     - pagaya
-    - vastdata 
+    - vastdata
+    - mondaydotcom
+    - wix
+    - rapyd
+    - taboolacom 

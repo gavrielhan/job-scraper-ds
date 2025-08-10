@@ -2,8 +2,9 @@ from __future__ import annotations
 import os
 import re
 import time
+import json
 from datetime import date
-from typing import List, Optional
+from typing import List, Optional, Any
 from tenacity import retry, stop_after_attempt, wait_exponential
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from ..models import JobPosting
@@ -15,7 +16,6 @@ def _normalize_title(title: str) -> str:
     if not t:
         return t
     tokens = t.split(" ")
-    # Remove any leading duplicated phrase (e.g., X Y X Y [rest] -> X Y [rest])
     changed = True
     while changed and len(tokens) >= 2:
         changed = False
@@ -25,15 +25,132 @@ def _normalize_title(title: str) -> str:
                 tokens = tokens[:k] + tokens[2 * k:]
                 changed = True
                 break
-    # Collapse consecutive duplicate words
     dedup: List[str] = []
     for w in tokens:
         if not dedup or dedup[-1].lower() != w.lower():
             dedup.append(w)
     t = " ".join(dedup)
-    # Specific cleanup
     t = re.sub(r"\s+with verification\b", "", t, flags=re.IGNORECASE).strip()
     return t
+
+
+def _extract_company_from_topcard(page) -> str:
+    selectors = [
+        "a.jobs-unified-top-card__company-name",
+        "a.topcard__org-name-link",
+        ".jobs-unified-top-card__company-name a",
+        ".jobs-unified-top-card__subtitle-primary-grouping a",
+        ".jobs-unified-top-card__company-name-without-image a",
+        ".topcard__flavor a",
+        ".jobs-unified-top-card__primary-description a",
+    ]
+    try:
+        topcard = page.query_selector(".jobs-unified-top-card, .topcard") or page
+        link = topcard.query_selector("a[href*='/company/']")
+        if link:
+            txt = (link.inner_text() or "").strip()
+            if txt:
+                return txt
+    except Exception:
+        pass
+    for sel in selectors:
+        try:
+            el = page.query_selector(sel)
+            if el:
+                txt = (el.inner_text() or "").strip()
+                if txt and txt.lower() != "none":
+                    return txt
+        except Exception:
+            continue
+    return ""
+
+
+def _deep_find_company(obj: Any) -> Optional[str]:
+    try:
+        if isinstance(obj, dict):
+            # Direct patterns
+            org = obj.get("hiringOrganization") or obj.get("organization")
+            if isinstance(org, dict):
+                name = org.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+            # Company-like keys
+            for k, v in obj.items():
+                kl = str(k).lower()
+                if kl in {"company", "companyname", "employer"}:
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+                    if isinstance(v, dict):
+                        n = v.get("name")
+                        if isinstance(n, str) and n.strip():
+                            return n.strip()
+                # Recurse
+                r = _deep_find_company(v)
+                if r:
+                    return r
+        elif isinstance(obj, list):
+            for it in obj:
+                r = _deep_find_company(it)
+                if r:
+                    return r
+    except Exception:
+        return None
+    return None
+
+
+def _extract_company_from_json(page) -> str:
+    # Try ld+json blocks first
+    try:
+        for script in page.query_selector_all('script[type="application/ld+json"]'):
+            try:
+                txt = script.inner_text()
+                if not txt:
+                    continue
+                data = json.loads(txt)
+                company = _deep_find_company(data)
+                if company:
+                    return company
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # Try __NEXT_DATA__
+    try:
+        next_data = page.query_selector('#__NEXT_DATA__')
+        if next_data:
+            data = json.loads(next_data.inner_text() or "{}")
+            company = _deep_find_company(data)
+            if company:
+                return company
+    except Exception:
+        pass
+    return ""
+
+
+def _extract_company_from_guest_endpoint(context, job_url: str) -> str:
+    try:
+        m = re.search(r"/jobs/view/(\d+)/", job_url)
+        if not m:
+            return ""
+        job_id = m.group(1)
+        guest_url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
+        page = context.new_page()
+        page.set_default_timeout(20000)
+        page.goto(guest_url, timeout=20000)
+        try:
+            page.wait_for_selector(".topcard__org-name-link, .topcard__flavor", timeout=5000)
+        except Exception:
+            pass
+        el = page.query_selector(".topcard__org-name-link") or page.query_selector(".topcard__flavor")
+        txt = (el.inner_text() or "").strip() if el else ""
+        page.close()
+        return txt
+    except Exception:
+        try:
+            page.close()
+        except Exception:
+            pass
+        return ""
 
 
 class LinkedInPlaywrightScraper(ScraperBase):
@@ -54,6 +171,7 @@ class LinkedInPlaywrightScraper(ScraperBase):
         self.location = location
         self.headless = headless
         self.max_jobs = max_jobs
+        self.debug = os.getenv("DEBUG_LINKEDIN", "false").lower() == "true"
         default_state = os.path.abspath(os.path.join(os.getcwd(), "data", "linkedin_state.json"))
         self.storage_state_path = storage_state_path or os.getenv("LINKEDIN_STORAGE_STATE", default_state)
 
@@ -117,69 +235,110 @@ class LinkedInPlaywrightScraper(ScraperBase):
                 while len(jobs) < self.max_jobs and load_iterations < 30:
                     job_cards = page.query_selector_all(probe_selectors)
                     for card in job_cards:
-                        # Read link first for dedupe and validity
                         link_el = (
                             card.query_selector("a.base-card__full-link")
                             or card.query_selector("a.job-card-list__title")
                             or card.query_selector("a")
                         )
-                        url = link_el.get_attribute("href") if link_el else None
-                        if not url:
+                        link_raw = link_el.get_attribute("href") if link_el else None
+                        if not link_raw:
                             continue
+                        url = link_raw
                         if url.startswith("/"):
                             url = f"https://www.linkedin.com{url}"
                         if "linkedin.com" not in url.lower():
                             continue
+                        if "?" in url:
+                            url = url.split("?")[0]
                         if url in seen_links:
                             continue
 
-                        # Open the card to read canonical title and company from the detail panel
+                        title_raw = ""
+                        company_raw = ""
                         try:
-                            card.click()
-                            page.wait_for_timeout(500)
+                            card_title_el = (
+                                card.query_selector(".base-search-card__title")
+                                or card.query_selector(".job-card-list__title")
+                                or card.query_selector(".job-card-container__link")
+                            )
+                            if card_title_el:
+                                title_raw = card_title_el.inner_text().strip()
                         except Exception:
                             pass
-                        title = None
-                        company = None
                         try:
-                            detail_title = page.query_selector("h1.jobs-unified-top-card__job-title, h1.topcard__title")
-                            if detail_title:
-                                title = _normalize_title(detail_title.inner_text().strip())
-                        except Exception:
-                            pass
-                        try:
-                            detail_company = page.query_selector("a.jobs-unified-top-card__company-name, a.topcard__org-name-link, .jobs-unified-top-card__company-name")
-                            if detail_company:
-                                company = (detail_company.inner_text().strip() or None)
+                            card_company_el = (
+                                card.query_selector(".base-search-card__subtitle a")
+                                or card.query_selector(".job-card-container__company-name")
+                                or card.query_selector(".base-search-card__subtitle")
+                            )
+                            if card_company_el:
+                                company_raw = (card_company_el.inner_text() or "").strip()
                         except Exception:
                             pass
 
-                        # Fallbacks from card list if needed
-                        if not title:
+                        # Click and wait for detail
+                        try:
+                            card.click()
+                            page.wait_for_timeout(500)
                             try:
-                                title_el = (
-                                    card.query_selector(".base-search-card__title")
-                                    or card.query_selector(".job-card-list__title")
-                                    or card.query_selector(".job-card-container__link")
-                                )
-                                if title_el:
-                                    title = _normalize_title(title_el.inner_text().strip())
+                                page.wait_for_selector("h1.jobs-unified-top-card__job-title, .jobs-unified-top-card, .topcard", timeout=5000)
                             except Exception:
                                 pass
+                        except Exception:
+                            pass
+                        detail_title_raw = ""
+                        try:
+                            detail_title_el = page.query_selector("h1.jobs-unified-top-card__job-title, h1.topcard__title")
+                            if detail_title_el:
+                                detail_title_raw = detail_title_el.inner_text().strip()
+                        except Exception:
+                            pass
+                        # Try JSON extraction first
+                        json_company_raw = _extract_company_from_json(page)
+                        # Fallback to topcard text
+                        detail_company_raw = json_company_raw or _extract_company_from_topcard(page)
+
+                        if self.debug:
+                            print(json.dumps({
+                                "debug_source": "LinkedInPlaywright",
+                                "card": {"title_raw": title_raw, "company_raw": company_raw, "link_raw": link_raw},
+                                "detail": {"title_raw": detail_title_raw, "company_raw": detail_company_raw, "json_company_raw": json_company_raw},
+                            }, ensure_ascii=False))
+
+                        # Processed values
+                        title = _normalize_title(detail_title_raw or title_raw)
+                        company = (detail_company_raw or company_raw or "").strip()
+
+                        # Last resort: open job URL directly
                         if not company:
                             try:
-                                company_el = (
-                                    card.query_selector(".base-search-card__subtitle a")
-                                    or card.query_selector(".job-card-container__company-name")
-                                    or card.query_selector(".base-search-card__subtitle")
-                                    or card.query_selector(".job-card-container__primary-description")
-                                )
-                                if company_el:
-                                    company = company_el.inner_text().strip()
+                                details_page = context.new_page()
+                                details_page.set_default_timeout(20000)
+                                details_page.goto(url, timeout=20000)
+                                try:
+                                    details_page.wait_for_selector(".jobs-unified-top-card, .topcard", timeout=5000)
+                                except Exception:
+                                    pass
+                                comp2 = _extract_company_from_json(details_page) or _extract_company_from_topcard(details_page)
+                                if self.debug:
+                                    print(json.dumps({"debug_source":"LinkedInPlaywright","direct_open_company_raw":comp2,"url":url}, ensure_ascii=False))
+                                if comp2:
+                                    company = comp2
                             except Exception:
                                 pass
-                        if company and company.lower() == "none":
-                            company = None
+                            finally:
+                                try:
+                                    details_page.close()
+                                except Exception:
+                                    pass
+
+                        # Guest endpoint fallback (no login content)
+                        if not company:
+                            comp3 = _extract_company_from_guest_endpoint(context, url)
+                            if self.debug:
+                                print(json.dumps({"debug_source":"LinkedInPlaywright","guest_endpoint_company_raw":comp3,"url":url}, ensure_ascii=False))
+                            if comp3:
+                                company = comp3
 
                         seen_links.add(url)
                         jobs.append(
