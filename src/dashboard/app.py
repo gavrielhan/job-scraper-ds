@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 
+API_URL = st.secrets.get("API_URL") or os.getenv("API_URL", "")
 DATA_PATH = os.path.abspath(os.path.join(os.getcwd(), "data", "jobs.csv"))
 ENRICHED_PATH = os.path.abspath(os.path.join(os.getcwd(), "data", "jobs_enriched.csv"))
 # Optional: override with a remote CSV for Streamlit Cloud (e.g., raw GitHub)
@@ -43,14 +44,15 @@ def load_data(path: str, remote_url: str, enriched_path: str) -> pd.DataFrame:
     return df[["source", "job_title", "company", "location", "url", "collected_at", "city_normalized", "title_normalized"] if "city_normalized" in df.columns else ["source", "job_title", "company", "location", "url", "collected_at"]]
 
 
-def trigger_fetch():
-    os.environ["LINKEDIN_MAX_JOBS"] = "125"
-    exit_code = os.system("python -m src.job_scraper.runner")
-    if exit_code == 0:
-        st.success("Fetch completed. Reloading data...")
-        st.cache_data.clear()
-    else:
-        st.error("Fetch failed. Check logs.")
+def trigger_fetch(query="Data Scientist", city="Tel Aviv", since_days=1):
+    if not API_URL:
+        st.error("API_URL not set in Streamlit secrets or env")
+        return None
+    return requests.post(
+        API_URL,
+        json={"query": query, "city": city, "since_days": int(since_days)},
+        timeout=25,
+    )
 
 
 def normalize_city(loc: str) -> str:
@@ -91,9 +93,24 @@ def normalize_city(loc: str) -> str:
 
 with st.sidebar:
     st.header("Filters")
+
+    # --- Fetch section ---
     if ENABLE_FETCH:
-        if st.button("Fetch more now (+100)"):
-            trigger_fetch()
+        with st.form("fetch_form", clear_on_submit=False):
+            q = st.text_input("Query", "Data Scientist", key="fetch_q")
+            city = st.text_input("City", "Tel Aviv", key="fetch_city")
+            since = st.number_input("Since days", 1, 30, 1, key="fetch_since")
+            go = st.form_submit_button("Fetch now")
+        if go:
+            resp = trigger_fetch(q, city, since)
+            if resp is not None:
+                if resp.ok:
+                    st.success("Fetch started ✅. Check S3 soon under snapshots/.")
+                else:
+                    st.error(f"Failed: {resp.status_code}")
+                st.code(resp.text, language="json")
+    else:
+        st.warning("Set API_URL in Streamlit secrets to enable fetching.")
 
     df = load_data(DATA_PATH, REMOTE_CSV, ENRICHED_PATH)
     sources = sorted(df["source"].dropna().unique().tolist())
