@@ -44,15 +44,12 @@ def load_data(path: str, remote_url: str, enriched_path: str) -> pd.DataFrame:
     return df[["source", "job_title", "company", "location", "url", "collected_at", "city_normalized", "title_normalized"] if "city_normalized" in df.columns else ["source", "job_title", "company", "location", "url", "collected_at"]]
 
 
-def trigger_fetch(query="Data Scientist", city="Tel Aviv", since_days=1):
+def trigger_fetch():
     if not API_URL:
         st.error("API_URL not set in Streamlit secrets or env")
         return None
-    return requests.post(
-        API_URL,
-        json={"query": query, "city": city, "since_days": int(since_days)},
-        timeout=25,
-    )
+    # no params — backend will use its defaults/config
+    return requests.post(API_URL, json={}, timeout=25)
 
 
 def normalize_city(loc: str) -> str:
@@ -93,24 +90,19 @@ def normalize_city(loc: str) -> str:
 
 with st.sidebar:
     st.header("Filters")
-
-    # --- Fetch section ---
     if ENABLE_FETCH:
-        with st.form("fetch_form", clear_on_submit=False):
-            q = st.text_input("Query", "Data Scientist", key="fetch_q")
-            city = st.text_input("City", "Tel Aviv", key="fetch_city")
-            since = st.number_input("Since days", 1, 30, 1, key="fetch_since")
-            go = st.form_submit_button("Fetch now")
-        if go:
-            resp = trigger_fetch(q, city, since)
+        if st.button("Fetch more now", type="primary"):
+            with st.spinner("Starting fetch…"):
+                resp = trigger_fetch()
             if resp is not None:
                 if resp.ok:
-                    st.success("Fetch started ✅. Check S3 soon under snapshots/.")
+                    st.success("Fetch started ✅. Check S3 soon.")
                 else:
                     st.error(f"Failed: {resp.status_code}")
                 st.code(resp.text, language="json")
     else:
         st.warning("Set API_URL in Streamlit secrets to enable fetching.")
+
 
     df = load_data(DATA_PATH, REMOTE_CSV, ENRICHED_PATH)
     sources = sorted(df["source"].dropna().unique().tolist())
