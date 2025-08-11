@@ -1,12 +1,15 @@
 # Uses Playwright + Python (Chromium preinstalled)
-FROM mcr.microsoft.com/playwright/python:v1.45.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.54.0-jammy
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt && pip install --no-cache-dir awscli
+# Install CPU-only torch first, then the rest
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.4.0 && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir awscli
 
-# Install Playwright browsers (Chromium used by LinkedIn)
-RUN python -m playwright install chromium
+# DO NOT install browsers again (already in base image)
+# RUN python -m playwright install chromium   # <-- remove this line
 
 # Copy project
 COPY . .
