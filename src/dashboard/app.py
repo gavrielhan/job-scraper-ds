@@ -5,6 +5,50 @@ import streamlit as st
 import plotly.express as px
 import requests
 
+import boto3
+from botocore.config import Config
+
+API_URL = st.secrets.get("API_URL", os.getenv("API_URL", ""))
+ENABLE_FETCH = (st.secrets.get("ENABLE_FETCH_BUTTON", "false").lower() == "true") and bool(API_URL)
+
+def _s3():
+    return boto3.client(
+        "s3",
+        aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
+        region_name=st.secrets.get("AWS_DEFAULT_REGION", "us-east-1"),
+        config=Config(retries={"max_attempts": 5, "mode": "standard"}),
+    )
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_latest_from_s3():
+    """Load jobs CSV from S3. Prefer jobs_latest.csv; otherwise pick newest *.csv in prefix."""
+    bucket = st.secrets.get("S3_BUCKET", "job-scraper-ds")
+    prefix = st.secrets.get("S3_PREFIX", "snapshots/")
+    s3 = _s3()
+
+    # 1) fast path: jobs_latest.csv
+    latest_key = f"{prefix}jobs_latest.csv"
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=latest_key)
+        return pd.read_csv(obj["Body"])
+    except Exception:
+        pass
+
+    # 2) otherwise, find newest *.csv under prefix
+    paginator = s3.get_paginator("list_objects_v2")
+    newest_key, newest_ts = None, None
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for o in page.get("Contents", []):
+            if o["Key"].endswith(".csv") and (newest_ts is None or o["LastModified"] > newest_ts):
+                newest_key, newest_ts = o["Key"], o["LastModified"]
+
+    if not newest_key:
+        return pd.DataFrame()
+
+    obj = s3.get_object(Bucket=bucket, Key=newest_key)
+    return pd.read_csv(obj["Body"])
+
 API_URL = st.secrets.get("API_URL") or os.getenv("API_URL", "")
 DATA_PATH = os.path.abspath(os.path.join(os.getcwd(), "data", "jobs.csv"))
 ENRICHED_PATH = os.path.abspath(os.path.join(os.getcwd(), "data", "jobs_enriched.csv"))
@@ -105,7 +149,15 @@ with st.sidebar:
         st.warning("Set API_URL in Streamlit secrets to enable fetching.")
 
 
-    df = load_data(DATA_PATH, REMOTE_CSV, ENRICHED_PATH)
+df = load_latest_from_s3()
+if df.empty:
+    # fallback to your existing loader (GitHub CSV / local)
+    try:
+        df = load_data(DATA_PATH, REMOTE_CSV, ENRICHED_PATH)
+        st.info("Loaded fallback dataset (S3 empty).")
+    except Exception as e:
+        st.error(f"Could not load data from S3 or fallback: {e}")
+        st.stop()
     sources = sorted(df["source"].dropna().unique().tolist())
     selected_sources = st.multiselect("Source", options=sources, default=sources)
 
