@@ -3,6 +3,7 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import requests
 
 API_URL = st.secrets.get("API_URL") or os.getenv("API_URL", "")
 DATA_PATH = os.path.abspath(os.path.join(os.getcwd(), "data", "jobs.csv"))
