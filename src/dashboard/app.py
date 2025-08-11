@@ -5,6 +5,7 @@ import streamlit as st
 import plotly.express as px
 
 DATA_PATH = os.path.abspath(os.path.join(os.getcwd(), "data", "jobs.csv"))
+ENRICHED_PATH = os.path.abspath(os.path.join(os.getcwd(), "data", "jobs_enriched.csv"))
 # Optional: override with a remote CSV for Streamlit Cloud (e.g., raw GitHub)
 DEFAULT_REMOTE_CSV = "https://raw.githubusercontent.com/gavrielhan/job-scraper-ds/main/data/jobs.csv"
 REMOTE_CSV = os.environ.get("DASHBOARD_DATA_URL", DEFAULT_REMOTE_CSV)
@@ -16,7 +17,7 @@ st.title("Data Scientist Jobs in Israel")
 st.caption("Interactive dashboard of open positions over time")
 
 @st.cache_data(ttl=600)
-def load_data(path: str, remote_url: str) -> pd.DataFrame:
+def load_data(path: str, remote_url: str, enriched_path: str) -> pd.DataFrame:
     # Try local file first
     if os.path.exists(path):
         df = pd.read_csv(path)
@@ -32,7 +33,14 @@ def load_data(path: str, remote_url: str) -> pd.DataFrame:
     for c in ["source", "job_title", "company", "location", "url", "collected_at"]:
         if c not in df.columns:
             df[c] = None
-    return df[["source", "job_title", "company", "location", "url", "collected_at"]]
+    # If enriched file exists, merge in normalized columns by URL
+    if os.path.exists(enriched_path):
+        try:
+            df_en = pd.read_csv(enriched_path, usecols=["url", "city_normalized", "title_normalized"]).drop_duplicates("url")
+            df = df.merge(df_en, on="url", how="left")
+        except Exception:
+            pass
+    return df[["source", "job_title", "company", "location", "url", "collected_at", "city_normalized", "title_normalized"] if "city_normalized" in df.columns else ["source", "job_title", "company", "location", "url", "collected_at"]]
 
 
 def trigger_fetch():
@@ -45,13 +53,49 @@ def trigger_fetch():
         st.error("Fetch failed. Check logs.")
 
 
+def normalize_city(loc: str) -> str:
+    if not isinstance(loc, str) or not loc.strip():
+        return "Tel Aviv-Yafo"
+    t = " ".join(loc.replace("\n", " ").split()).strip(", ")
+    tl = t.lower()
+    # If generic country
+    if tl == "israel":
+        return "Tel Aviv-Yafo"
+    # Strip trailing country
+    if tl.endswith(", israel"):
+        t = t[:-8]
+        tl = t.lower()
+    # Tel Aviv variants
+    tel_variants = ["tel aviv-yafo", "tel-aviv-yafo", "tel aviv yafo", "tel aviv", "tel-aviv"]
+    if any(v in tl for v in tel_variants):
+        return "Tel Aviv-Yafo"
+    mapping = {
+        "jerusalem": "Jerusalem",
+        "haifa": "Haifa",
+        "herzliya": "Herzliya",
+        "ra'anana": "Ra'anana",
+        "beer sheva": "Beer Sheva",
+        "be'er sheva": "Beer Sheva",
+        "netanya": "Netanya",
+        "ashdod": "Ashdod",
+        "ashkelon": "Ashkelon",
+        "rishon": "Rishon LeZion",
+        "petah tikva": "Petah Tikva",
+    }
+    for k, v in mapping.items():
+        if k in tl:
+            return v
+    # Default to original (without country)
+    return t
+
+
 with st.sidebar:
     st.header("Filters")
     if ENABLE_FETCH:
         if st.button("Fetch more now (+100)"):
             trigger_fetch()
 
-    df = load_data(DATA_PATH, REMOTE_CSV)
+    df = load_data(DATA_PATH, REMOTE_CSV, ENRICHED_PATH)
     sources = sorted(df["source"].dropna().unique().tolist())
     selected_sources = st.multiselect("Source", options=sources, default=sources)
 
@@ -77,19 +121,28 @@ col3.metric("Snapshots", filtered["collected_at"].nunique())
 if not filtered.empty:
     dist_col1, dist_col2 = st.columns(2)
 
-    # Location percentages
-    loc_series = filtered["location"].fillna("Unknown")
-    loc_counts = loc_series.value_counts(dropna=False).reset_index()
-    loc_counts.columns = ["location", "count"]
+    # Location percentages (prefer normalized city)
+    if "city_normalized" in filtered.columns:
+        city_series = filtered["city_normalized"].fillna("")
+        # For empty normalized entries, fall back to normalized-from-location
+        city_series = city_series.mask(city_series.eq("") | city_series.isna(), filtered["location"].fillna("").map(normalize_city))
+    else:
+        city_series = filtered["location"].fillna("").map(normalize_city)
+    loc_counts = city_series.value_counts(dropna=False).reset_index()
+    loc_counts.columns = ["city", "count"]
     loc_counts["percent"] = (loc_counts["count"] / loc_counts["count"].sum() * 100).round(1)
     loc_counts["percent_label"] = loc_counts["percent"].astype(str) + "%"
-    fig_loc = px.bar(loc_counts, x="location", y="percent", text="percent_label", title="Locations (% of filtered)")
+    fig_loc = px.bar(loc_counts, x="city", y="percent", text="percent_label", title="Locations (% of filtered)")
     fig_loc.update_yaxes(title="Percent", range=[0, 100])
     fig_loc.update_layout(xaxis_title="Location", yaxis_ticksuffix="%", uniformtext_minsize=10, uniformtext_mode="hide")
     dist_col1.plotly_chart(fig_loc, use_container_width=True)
 
-    # Titles pie (top 12 + Other)
-    title_series = filtered["job_title"].fillna("Unknown")
+    # Titles pie (prefer normalized title)
+    if "title_normalized" in filtered.columns:
+        title_series = filtered["title_normalized"].fillna("")
+        title_series = title_series.mask(title_series.eq("") | title_series.isna(), filtered["job_title"].fillna("Unknown"))
+    else:
+        title_series = filtered["job_title"].fillna("Unknown")
     title_counts = title_series.value_counts().reset_index()
     title_counts.columns = ["job_title", "count"]
     top_n = 12
