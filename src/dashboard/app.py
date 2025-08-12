@@ -11,7 +11,11 @@ import re
 import json
 import boto3
 from zoneinfo import ZoneInfo
-from streamlit_autorefresh import st_autorefresh
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    def st_autorefresh(*args, **kwargs):
+        return None
 
 
 API_URL = st.secrets.get("API_URL") or os.getenv("API_URL", "")
