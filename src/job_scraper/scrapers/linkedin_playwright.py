@@ -10,17 +10,29 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from ..models import JobPosting
 from .base import ScraperBase
 
+# New helpers to block trackers and clear modal overlays
 
-def _guard_creds(self) -> None:
-    # OK if we have a saved session
-    if os.path.exists(self.storage_state_path):
-        return
-    # Otherwise require email+password
-    if not (self.email and self.password):
-        raise RuntimeError(
-            "LinkedIn credentials are missing. Set LINKEDIN_EMAIL and LINKEDIN_PASSWORD in .env, "
-            "or provide a storage state file."
+def _should_block(url: str) -> bool:
+    u = (url or "").lower()
+    return any(host in u for host in [
+        "doubleclick.net", "googletagmanager.com", "googlesyndication.com",
+        "google-analytics.com", "demdex.net", "facebook.net", "bat.bing.com"
+    ])
+
+
+def clear_overlays(page) -> None:
+    try:
+        page.evaluate(
+            """
+          for (const sel of [
+            '.modal__overlay', '.top-level-modal-container',
+            '.artdeco-modal-overlay', '[data-test-modal-overlay]'
+          ]) { document.querySelectorAll(sel).forEach(el => el.remove()); }
+        """
         )
+    except Exception:
+        pass
+
 
 def _normalize_title(title: str) -> str:
     t = " ".join((title or "").split())
@@ -363,6 +375,8 @@ class LinkedInPlaywrightScraper(ScraperBase):
 
             page = context.new_page()
             page.set_default_timeout(90_000)
+            # Block noisy trackers/iframes that can spawn overlays
+            page.route("**/*", lambda r: r.abort() if _should_block(r.request.url) else r.continue_())
 
             # If we have a session, skip the login page entirely
             if os.path.exists(self.storage_state_path):
@@ -405,134 +419,77 @@ class LinkedInPlaywrightScraper(ScraperBase):
                     + self.location.replace(" ", "%20")
                 )
                 page.goto(search_url, timeout=90000)
-                scroll_container_sel = ".jobs-search-results-list"
-                probe_selectors = ", ".join([
-                    "li.jobs-search-results__list-item",
-                    "div.base-card",
-                    "div.job-card-container",
-                ])
-                for _ in range(10):
-                    if page.query_selector_all(probe_selectors):
-                        break
+                clear_overlays(page)
+
+                # Load more results without clicking anything
+                for _ in range(12):
                     try:
-                        if page.query_selector(scroll_container_sel):
-                            page.eval_on_selector(scroll_container_sel, "el => el.scrollBy(0, 800)")
-                        else:
-                            page.evaluate("window.scrollBy(0, 800)")
+                        page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
                     except Exception:
                         pass
-                    page.wait_for_timeout(1000)
+                    page.wait_for_timeout(800)
+                    clear_overlays(page)
+
+                # Collect job links from list DOM
+                anchors = page.query_selector_all("a.base-card__full-link, a.job-card-list__title, .job-card-container__link")
+                urls: List[str] = []
+                for a in anchors:
+                    href = (a.get_attribute("href") or "").strip()
+                    if not href:
+                        continue
+                    if href.startswith("/"):
+                        href = "https://www.linkedin.com" + href
+                    if "linkedin.com" in href and "/jobs/view/" in href:
+                        urls.append(href.split("?")[0])
+
+                # Deduplicate while preserving order
+                seen: set[str] = set()
+                urls = [u for u in urls if not (u in seen or seen.add(u))]
 
                 jobs: List[JobPosting] = []
-                seen_links: set[str] = set()
-                load_iterations = 0
+                for url in urls:
+                    if len(jobs) >= self.max_jobs:
+                        break
+                    details = context.new_page()
+                    details.set_default_timeout(30000)
+                    try:
+                        details.goto(url, timeout=30000)
+                        clear_overlays(details)
+                        try:
+                            details.wait_for_selector(".jobs-unified-top-card, .topcard", timeout=5000)
+                        except Exception:
+                            pass
 
-                while len(jobs) < self.max_jobs and load_iterations < 30:
-                    job_cards = page.query_selector_all(probe_selectors)
-                    for card in job_cards:
-                        link_el = (
-                            card.query_selector("a.base-card__full-link")
-                            or card.query_selector("a.job-card-list__title")
-                            or card.query_selector("a")
-                        )
-                        link_raw = link_el.get_attribute("href") if link_el else None
-                        if not link_raw:
-                            continue
-                        url = link_raw
-                        if url.startswith("/"):
-                            url = f"https://www.linkedin.com{url}"
-                        if "linkedin.com" not in url.lower():
-                            continue
-                        if "?" in url:
-                            url = url.split("?")[0]
-                        if url in seen_links:
-                            continue
-
+                        # Title
                         title_raw = ""
-                        company_raw = ""
-                        try:
-                            card_title_el = (
-                                card.query_selector(".base-search-card__title")
-                                or card.query_selector(".job-card-list__title")
-                                or card.query_selector(".job-card-container__link")
-                            )
-                            if card_title_el:
-                                title_raw = card_title_el.inner_text().strip()
-                        except Exception:
-                            pass
-                        try:
-                            card_company_el = (
-                                card.query_selector(".base-search-card__subtitle a")
-                                or card.query_selector(".job-card-container__company-name")
-                                or card.query_selector(".base-search-card__subtitle")
-                            )
-                            if card_company_el:
-                                company_raw = (card_company_el.inner_text() or "").strip()
-                        except Exception:
-                            pass
+                        h1 = details.query_selector("h1.jobs-unified-top-card__job-title, h1.topcard__title")
+                        if h1:
+                            title_raw = (h1.inner_text() or "").strip()
 
-                        # Open each job directly; do not click list cards (avoid overlay)
-                        detail_title_raw = ""
-                        company = (company_raw or "").strip()
-                        loc = ""
-                        try:
-                            details = context.new_page()
-                            details.set_default_timeout(30000)
-                            details.goto(url, timeout=30000)
-                            try:
-                                details.wait_for_selector(".jobs-unified-top-card, .topcard", timeout=8000)
-                            except Exception:
-                                pass
-                            # title
-                            el = details.query_selector("h1.jobs-unified-top-card__job-title, h1.topcard__title")
-                            if el:
-                                detail_title_raw = (el.inner_text() or "").strip()
-                            # company & location via JSON/topcard helpers
-                            company2 = _extract_company_from_json(details) or _extract_company_from_topcard(details)
-                            if company2:
-                                company = company2
-                            loc2 = _extract_location_from_json(details) or _extract_location_from_topcard(details)
-                            if loc2:
-                                loc = loc2
-                            # guest fallbacks
-                            if not company:
-                                company = _extract_company_from_guest_endpoint(context, url) or company
-                            if not loc:
-                                loc = _extract_location_from_guest_endpoint(context, url) or loc
-                        finally:
-                            try:
-                                details.close()
-                            except Exception:
-                                pass
+                        # Company & location: prefer JSON, then topcard; guest endpoint as fallback
+                        company = _extract_company_from_json(details) or _extract_company_from_topcard(details)
+                        loc = _extract_location_from_json(details) or _extract_location_from_topcard(details)
 
-                        # processed values
-                        title = _normalize_title(detail_title_raw or title_raw)
-                        # company, loc already best-effort populated above
+                        if not company:
+                            company = _extract_company_from_guest_endpoint(context, url) or ""
+                        if not loc:
+                            loc = _extract_location_from_guest_endpoint(context, url) or ""
 
-                        seen_links.add(url)
                         jobs.append(
                             JobPosting(
                                 source="LinkedIn (Playwright)",
-                                job_title=title or "",
-                                company=company or "",
+                                job_title=_normalize_title(title_raw) or "",
+                                company=(company or "").strip(),
                                 location=loc or self.location,
                                 url=url,
                                 collected_at=as_of,
                             )
                         )
-                        if len(jobs) >= self.max_jobs:
-                            break
-                    if len(jobs) >= self.max_jobs:
-                        break
-                    try:
-                        if page.query_selector(scroll_container_sel):
-                            page.eval_on_selector(scroll_container_sel, "el => el.scrollTo(0, el.scrollHeight)")
-                        else:
-                            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    except PlaywrightTimeoutError:
-                        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(1200)
-                    load_iterations += 1
+                    finally:
+                        try:
+                            details.close()
+                        except Exception:
+                            pass
 
                 return jobs
             finally:
