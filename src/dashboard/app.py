@@ -49,6 +49,7 @@ S3_META_PREFIX = (
 S3_META_PREFIX = S3_META_PREFIX.strip("/")
 SCHEDULE_HRS = int(os.getenv("SCHEDULE_HOURS", st.secrets.get("SCHEDULE_HOURS", 12)))
 _s3_client = boto3.client("s3", region_name=AWS_REGION)
+NEXT_RUN_REFRESH_SECS = int(os.getenv("NEXT_RUN_REFRESH_SECS", st.secrets.get("NEXT_RUN_REFRESH_SECS", 36000)))  # 10h default
 
 def fetch_next_run_from_s3():
     key = f"{S3_META_PREFIX}/meta/next_run.json"
@@ -58,6 +59,25 @@ def fetch_next_run_from_s3():
         return datetime.fromisoformat(data.get("next_run_at"))
     except Exception:
         return None
+
+def get_next_run_cached():
+    now_utc = datetime.now(timezone.utc)
+    last_checked = st.session_state.get("_next_run_last_checked")
+    cached = st.session_state.get("_next_run_at")
+    should_refresh = (
+        cached is None
+        or last_checked is None
+        or (now_utc - last_checked).total_seconds() >= NEXT_RUN_REFRESH_SECS
+    )
+    if should_refresh:
+        value = fetch_next_run_from_s3()
+        # Normalize to aware UTC
+        if value is not None and value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        st.session_state["_next_run_at"] = value
+        st.session_state["_next_run_last_checked"] = now_utc
+        return value
+    return cached
 
 # Optional: perform in-memory enrichment instead of relying on jobs_enriched.csv
 SELF_ENRICH = os.environ.get("SELF_ENRICH", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -319,7 +339,7 @@ def classify_title_heuristic(title: str) -> str:
 
 with st.sidebar:
     st.subheader("Next scheduled fetch")
-    next_dt = fetch_next_run_from_s3()
+    next_dt = get_next_run_cached()
     if not next_dt:
         st.caption("No schedule found yet. It will appear after the first scheduled run writes metadata.")
     else:
@@ -331,6 +351,8 @@ with st.sidebar:
         remaining = (target - now).total_seconds()
         if remaining <= 0:
             st.success(f"Next fetch is due now (scheduled for {target:%Y-%m-%d %H:%M:%S %Z}) 🚀")
+            # Force next rerun to fetch fresh schedule from S3
+            st.session_state["_next_run_last_checked"] = datetime(1970,1,1,tzinfo=timezone.utc)
         else:
             h = int(remaining // 3600)
             m = int((remaining % 3600) // 60)
