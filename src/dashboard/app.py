@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -8,6 +8,10 @@ import requests
 from sentence_transformers import SentenceTransformer, util
 from typing import List
 import re
+import json
+import boto3
+from zoneinfo import ZoneInfo
+from streamlit_autorefresh import st_autorefresh
 
 
 API_URL = st.secrets.get("API_URL") or os.getenv("API_URL", "")
@@ -22,6 +26,35 @@ ENABLE_FETCH = os.environ.get("ENABLE_FETCH_BUTTON", "").strip().lower() in {"1"
 USE_S3 = os.environ.get("USE_S3", "").strip().lower() in {"1", "true", "yes", "on"}
 S3_BUCKET = st.secrets.get("S3_BUCKET", "")
 S3_PREFIX = st.secrets.get("S3_PREFIX", "snapshots/")
+# Countdown config (read next_run.json from S3) — prefer OUTPUT_* then secrets fallbacks
+AWS_REGION = os.getenv("AWS_REGION", st.secrets.get("AWS_DEFAULT_REGION", "us-east-1"))
+S3_META_BUCKET = (
+    os.getenv("OUTPUT_BUCKET")
+    or st.secrets.get("OUTPUT_BUCKET")
+    or st.secrets.get("S3_BUCKET")
+    or S3_BUCKET
+    or "job-scraper-ds"
+)
+S3_META_PREFIX = (
+    os.getenv("OUTPUT_PREFIX")
+    or st.secrets.get("OUTPUT_PREFIX")
+    or st.secrets.get("S3_PREFIX")
+    or S3_PREFIX
+    or "snapshots"
+)
+S3_META_PREFIX = S3_META_PREFIX.strip("/")
+SCHEDULE_HRS = int(os.getenv("SCHEDULE_HOURS", st.secrets.get("SCHEDULE_HOURS", 12)))
+_s3_client = boto3.client("s3", region_name=AWS_REGION)
+
+def fetch_next_run_from_s3():
+    key = f"{S3_META_PREFIX}/meta/next_run.json"
+    try:
+        obj = _s3_client.get_object(Bucket=S3_META_BUCKET, Key=key)
+        data = json.loads(obj["Body"].read())
+        return datetime.fromisoformat(data.get("next_run_at"))
+    except Exception:
+        return None
+
 # Optional: perform in-memory enrichment instead of relying on jobs_enriched.csv
 SELF_ENRICH = os.environ.get("SELF_ENRICH", "").strip().lower() in {"1", "true", "yes", "on"}
 SELF_ENRICH_MODE = os.environ.get("SELF_ENRICH_MODE", "embed").strip().lower()  # "embed" or "flan"
@@ -281,6 +314,28 @@ def classify_title_heuristic(title: str) -> str:
 
 
 with st.sidebar:
+    st.subheader("Next scheduled fetch")
+    next_dt = fetch_next_run_from_s3()
+    if not next_dt:
+        st.caption("No schedule found yet. It will appear after the first scheduled run writes metadata.")
+    else:
+        # Auto-rerun every 1s so the timer ticks
+        st_autorefresh(interval=1000, key="next-fetch-ticker")
+        tz = ZoneInfo("Asia/Jerusalem")
+        target = next_dt.astimezone(tz) if next_dt.tzinfo else next_dt.replace(tzinfo=timezone.utc).astimezone(tz)
+        now = datetime.now(timezone.utc).astimezone(tz)
+        remaining = (target - now).total_seconds()
+        if remaining <= 0:
+            st.success(f"Next fetch is due now (scheduled for {target:%Y-%m-%d %H:%M:%S %Z}) 🚀")
+        else:
+            h = int(remaining // 3600)
+            m = int((remaining % 3600) // 60)
+            s = int(remaining % 60)
+            st.metric("Time to next fetch", f"{h:02d}:{m:02d}:{s:02d}", help=f"Scheduled at {target:%Y-%m-%d %H:%M:%S %Z}")
+            total = max(1, SCHEDULE_HRS * 3600)
+            elapsed = total - int(remaining)
+            st.progress(min(1.0, elapsed / total))
+
     st.header("Filters")
     if ENABLE_FETCH:
         if st.button("Fetch more now", type="primary"):
