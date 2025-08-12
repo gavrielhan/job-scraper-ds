@@ -280,13 +280,9 @@ col3.metric("Snapshots", filtered["collected_at"].nunique())
 if not filtered.empty:
     dist_col1, dist_col2 = st.columns(2)
 
-    # Location percentages (prefer normalized city)
-    if "city_normalized" in filtered.columns:
-        city_series = filtered["city_normalized"].fillna("")
-        # For empty normalized entries, fall back to normalized-from-location
-        city_series = city_series.mask(city_series.eq("") | city_series.isna(), filtered["location"].fillna("").map(normalize_city))
-    else:
-        city_series = filtered["location"].fillna("").map(normalize_city)
+    # Location percentages (always normalize with normalize_city)
+    base_city = filtered["city_normalized"] if "city_normalized" in filtered.columns else filtered["location"]
+    city_series = base_city.fillna("").map(normalize_city)
     loc_counts = city_series.value_counts(dropna=False).reset_index()
     loc_counts.columns = ["city", "count"]
     loc_counts["percent"] = (loc_counts["count"] / loc_counts["count"].sum() * 100).round(1)
@@ -296,12 +292,9 @@ if not filtered.empty:
     fig_loc.update_layout(xaxis_title="Location", yaxis_ticksuffix="%", uniformtext_minsize=10, uniformtext_mode="hide")
     dist_col1.plotly_chart(fig_loc, use_container_width=True)
 
-    # Titles pie (prefer normalized title)
-    if "title_normalized" in filtered.columns:
-        title_series = filtered["title_normalized"].fillna("")
-        title_series = title_series.mask(title_series.eq("") | title_series.isna(), filtered["job_title"].fillna("Unknown"))
-    else:
-        title_series = filtered["job_title"].fillna("Unknown")
+    # Titles pie (apply heuristic mapper even when normalized present)
+    base_title = filtered["title_normalized"] if "title_normalized" in filtered.columns else filtered["job_title"]
+    title_series = base_title.fillna("Unknown").map(lambda t: classify_title_heuristic(t) or t)
     title_counts = title_series.value_counts().reset_index()
     title_counts.columns = ["job_title", "count"]
     top_n = 12
