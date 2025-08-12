@@ -5,49 +5,10 @@ import streamlit as st
 import plotly.express as px
 import requests
 
-import boto3
-from botocore.config import Config
+from sentence_transformers import SentenceTransformer, util
+from typing import List
 
-API_URL = st.secrets.get("API_URL", os.getenv("API_URL", ""))
-ENABLE_FETCH = (st.secrets.get("ENABLE_FETCH_BUTTON", "false").lower() == "true") and bool(API_URL)
 
-def _s3():
-    return boto3.client(
-        "s3",
-        aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
-        region_name=st.secrets.get("AWS_DEFAULT_REGION", "us-east-1"),
-        config=Config(retries={"max_attempts": 5, "mode": "standard"}),
-    )
-
-@st.cache_data(ttl=120, show_spinner=False)
-def load_latest_from_s3():
-    """Load jobs CSV from S3. Prefer jobs_latest.csv; otherwise pick newest *.csv in prefix."""
-    bucket = st.secrets.get("S3_BUCKET", "job-scraper-ds")
-    prefix = st.secrets.get("S3_PREFIX", "snapshots/")
-    s3 = _s3()
-
-    # 1) fast path: jobs_latest.csv
-    latest_key = f"{prefix}jobs_latest.csv"
-    try:
-        obj = s3.get_object(Bucket=bucket, Key=latest_key)
-        return pd.read_csv(obj["Body"])
-    except Exception:
-        pass
-
-    # 2) otherwise, find newest *.csv under prefix
-    paginator = s3.get_paginator("list_objects_v2")
-    newest_key, newest_ts = None, None
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for o in page.get("Contents", []):
-            if o["Key"].endswith(".csv") and (newest_ts is None or o["LastModified"] > newest_ts):
-                newest_key, newest_ts = o["Key"], o["LastModified"]
-
-    if not newest_key:
-        return pd.DataFrame()
-
-    obj = s3.get_object(Bucket=bucket, Key=newest_key)
-    return pd.read_csv(obj["Body"])
 
 API_URL = st.secrets.get("API_URL") or os.getenv("API_URL", "")
 DATA_PATH = os.path.abspath(os.path.join(os.getcwd(), "data", "jobs.csv"))
@@ -57,6 +18,41 @@ DEFAULT_REMOTE_CSV = "https://raw.githubusercontent.com/gavrielhan/job-scraper-d
 REMOTE_CSV = os.environ.get("DASHBOARD_DATA_URL", DEFAULT_REMOTE_CSV)
 # Only show local fetch button if explicitly enabled
 ENABLE_FETCH = os.environ.get("ENABLE_FETCH_BUTTON", "").strip().lower() in {"1", "true", "yes", "on"}
+# Optional: read data from S3 directly (private bucket) if enabled
+USE_S3 = os.environ.get("USE_S3", "").strip().lower() in {"1", "true", "yes", "on"}
+S3_BUCKET = st.secrets.get("S3_BUCKET", "")
+S3_PREFIX = st.secrets.get("S3_PREFIX", "snapshots/")
+# Optional: perform in-memory enrichment instead of relying on jobs_enriched.csv
+SELF_ENRICH = os.environ.get("SELF_ENRICH", "").strip().lower() in {"1", "true", "yes", "on"}
+ENRICH_THRESHOLD = float(os.environ.get("ENRICH_THRESHOLD", "0.55"))
+HF_SENTENCE_MODEL = os.environ.get("HF_SENTENCE_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+# Canonical label sets used for normalization
+CITY_CANON = [
+    "Tel Aviv-Yafo",
+    "Jerusalem",
+    "Haifa",
+    "Herzliya",
+    "Ra'anana",
+    "Beer Sheva",
+    "Netanya",
+    "Ashdod",
+    "Ashkelon",
+    "Rishon LeZion",
+    "Petah Tikva",
+    "Other",
+]
+TITLE_CANON = [
+    "Data Scientist",
+    "Machine Learning Engineer",
+    "AI Engineer",
+    "Data Analyst",
+    "Data Engineer",
+    "Data Architect",
+    "Research Scientist",
+    "Data Science Manager",
+    "Bioinformatics Scientist",
+    "Other",
+]
 
 st.set_page_config(page_title="Data Scientist Jobs in Israel", layout="wide")
 st.title("Data Scientist Jobs in Israel")
@@ -64,15 +60,58 @@ st.caption("Interactive dashboard of open positions over time")
 
 @st.cache_data(ttl=600)
 def load_data(path: str, remote_url: str, enriched_path: str) -> pd.DataFrame:
-    # Try local file first
-    if os.path.exists(path):
-        df = pd.read_csv(path)
-    else:
-        # Fallback to remote CSV (raw GitHub)
+    # If configured, try S3 first
+    if USE_S3 and S3_BUCKET:
         try:
-            df = pd.read_csv(remote_url)
+            import boto3
+            from botocore.config import Config
+            s3 = boto3.client(
+                "s3",
+                aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
+                aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
+                region_name=st.secrets.get("AWS_DEFAULT_REGION", "us-east-1"),
+                config=Config(retries={"max_attempts": 5, "mode": "standard"}),
+            )
+            # Prefer jobs_latest.csv; otherwise newest *.csv
+            latest_key = f"{S3_PREFIX}jobs_latest.csv"
+            try:
+                obj = s3.get_object(Bucket=S3_BUCKET, Key=latest_key)
+                df = pd.read_csv(obj["Body"])
+            except Exception:
+                paginator = s3.get_paginator("list_objects_v2")
+                newest_key, newest_ts = None, None
+                for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=S3_PREFIX):
+                    for o in page.get("Contents", []):
+                        if o["Key"].endswith(".csv") and (newest_ts is None or o["LastModified"] > newest_ts):
+                            newest_key, newest_ts = o["Key"], o["LastModified"]
+                if newest_key:
+                    obj = s3.get_object(Bucket=S3_BUCKET, Key=newest_key)
+                    df = pd.read_csv(obj["Body"])
+                else:
+                    df = pd.DataFrame()
+            if not df.empty:
+                # proceed to post-processing (col parsing, enrichment merge)
+                pass
+            else:
+                # fall through to local/remote
+                raise RuntimeError("No CSV objects found in S3")
         except Exception:
-            return pd.DataFrame(columns=["source", "job_title", "company", "location", "url", "collected_at"])
+            # S3 disabled or failed — fallback to local/remote
+            df = None
+    else:
+        df = None
+
+    if df is None:
+        # Try local file first
+        if os.path.exists(path):
+            df = pd.read_csv(path)
+        else:
+            # Fallback to remote CSV (raw GitHub)
+            try:
+                df = pd.read_csv(remote_url)
+            except Exception:
+                return pd.DataFrame(columns=["source", "job_title", "company", "location", "url", "collected_at"])
+
     if "collected_at" in df.columns:
         df["collected_at"] = pd.to_datetime(df["collected_at"]).dt.date
     # Ensure expected columns exist
@@ -87,6 +126,28 @@ def load_data(path: str, remote_url: str, enriched_path: str) -> pd.DataFrame:
         except Exception:
             pass
     return df[["source", "job_title", "company", "location", "url", "collected_at", "city_normalized", "title_normalized"] if "city_normalized" in df.columns else ["source", "job_title", "company", "location", "url", "collected_at"]]
+
+
+# Cached model loader so the embedding model is initialized once
+@st.cache_resource(show_spinner=False)
+def get_embed_model(model_name: str) -> SentenceTransformer:
+    return SentenceTransformer(model_name)
+
+
+def normalize_strings_embed(values: List[str], canon_list: List[str], model: SentenceTransformer, threshold: float) -> List[str]:
+    emb_canon = model.encode(canon_list, convert_to_tensor=True, normalize_embeddings=True)
+    out: List[str] = []
+    for v in values:
+        txt = (v or "").strip()
+        if not txt:
+            out.append("")
+            continue
+        emb = model.encode([txt], convert_to_tensor=True, normalize_embeddings=True)
+        sim = util.cos_sim(emb, emb_canon)[0]
+        idx = int(sim.argmax())
+        score = float(sim[idx])
+        out.append(canon_list[idx] if score >= threshold else txt)
+    return out
 
 
 def trigger_fetch():
@@ -149,15 +210,16 @@ with st.sidebar:
         st.warning("Set API_URL in Streamlit secrets to enable fetching.")
 
 
-df = load_latest_from_s3()
-if df.empty:
-    # fallback to your existing loader (GitHub CSV / local)
-    try:
-        df = load_data(DATA_PATH, REMOTE_CSV, ENRICHED_PATH)
-        st.info("Loaded fallback dataset (S3 empty).")
-    except Exception as e:
-        st.error(f"Could not load data from S3 or fallback: {e}")
-        st.stop()
+    df = load_data(DATA_PATH, REMOTE_CSV, ENRICHED_PATH)
+    # If no enriched columns present and SELF_ENRICH is enabled, compute in-memory
+    if SELF_ENRICH and ("city_normalized" not in df.columns or "title_normalized" not in df.columns):
+        with st.spinner("Enriching locations and titles in-memory…"):
+            model = get_embed_model(HF_SENTENCE_MODEL)
+            loc_values = df.get("location", pd.Series([""] * len(df))).fillna("").astype(str).tolist()
+            title_values = df.get("job_title", pd.Series([""] * len(df))).fillna("").astype(str).tolist()
+            df["city_normalized"] = normalize_strings_embed(loc_values, CITY_CANON, model, ENRICH_THRESHOLD)
+            df["title_normalized"] = normalize_strings_embed(title_values, TITLE_CANON, model, ENRICH_THRESHOLD)
+        st.caption("Using self-enrichment for normalized city/title (no CSV saved)")
     sources = sorted(df["source"].dropna().unique().tolist())
     selected_sources = st.multiselect("Source", options=sources, default=sources)
 

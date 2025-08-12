@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os
+import os, os.path
 import re
 import time
 import json
@@ -10,6 +10,17 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from ..models import JobPosting
 from .base import ScraperBase
 
+
+def _guard_creds(self) -> None:
+    # OK if we have a saved session
+    if os.path.exists(self.storage_state_path):
+        return
+    # Otherwise require email+password
+    if not (self.email and self.password):
+        raise RuntimeError(
+            "LinkedIn credentials are missing. Set LINKEDIN_EMAIL and LINKEDIN_PASSWORD in .env, "
+            "or provide a storage state file."
+        )
 
 def _normalize_title(title: str) -> str:
     t = " ".join((title or "").split())
@@ -321,7 +332,8 @@ class LinkedInPlaywrightScraper(ScraperBase):
         self.max_jobs = max_jobs
         self.debug = os.getenv("DEBUG_LINKEDIN", "false").lower() == "true"
         default_state = os.path.abspath(os.path.join(os.getcwd(), "data", "linkedin_state.json"))
-        self.storage_state_path = storage_state_path or os.getenv("LINKEDIN_STORAGE_STATE", default_state)
+        state_env = os.getenv("LINKEDIN_STORAGE_STATE") or os.getenv("STORAGE_STATE")
+        self.storage_state_path = storage_state_path or state_env or default_state
 
     def _guard_creds(self) -> None:
         if not os.path.exists(self.storage_state_path) and (not self.email or not self.password):
@@ -334,22 +346,47 @@ class LinkedInPlaywrightScraper(ScraperBase):
         self._guard_creds()
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=self.headless)
-            context = browser.new_context(storage_state=self.storage_state_path) if os.path.exists(self.storage_state_path) else browser.new_context()
+            if os.path.exists(self.storage_state_path):
+                context = browser.new_context(storage_state=self.storage_state_path)
+            else:
+                context = browser.new_context()
+
             page = context.new_page()
-            page.set_default_timeout(90000)
+            page.set_default_timeout(90_000)
+
+            # If we have a session, skip the login page entirely
+            if os.path.exists(self.storage_state_path):
+                try:
+                    page.goto("https://www.linkedin.com/feed/", timeout=90_000)
+                except Exception:
+                    pass
+
+            # Kill the full-screen modal overlay if it appears (checkpoint/banner)
+            try:
+                page.evaluate("""() => {
+                    const a = document.querySelector('.top-level-modal-container');
+                    if (a) a.remove();
+                    const b = document.querySelector('.modal__overlay');
+                    if (b) b.remove();
+                }""")
+            except Exception:
+                pass
+
             try:
                 if not os.path.exists(self.storage_state_path):
-                    page.goto("https://www.linkedin.com/login", timeout=90000)
+                    # normal login path (first run only)
+                    page.goto("https://www.linkedin.com/login", timeout=90_000)
                     try:
-                        page.click("button:has-text('Accept')", timeout=3000)
+                        page.click("button:has-text('Accept')", timeout=3_000)
                     except Exception:
                         pass
                     page.fill("input#username", self.email)
                     page.fill("input#password", self.password)
                     page.click("button[type=submit]")
-                    page.wait_for_timeout(2000)
+                    page.wait_for_timeout(2_000)
                     os.makedirs(os.path.dirname(self.storage_state_path), exist_ok=True)
                     context.storage_state(path=self.storage_state_path)
+                    print(f"[li] saved storage state to {self.storage_state_path}")
 
                 search_url = (
                     "https://www.linkedin.com/jobs/search/?keywords="
