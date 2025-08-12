@@ -3,6 +3,7 @@ import argparse
 from datetime import date, datetime
 from typing import List
 import os
+import boto3
 
 from .config import AppConfig, ensure_dirs, load_sources_config
 from .models import JobPosting
@@ -14,6 +15,19 @@ from .scrapers import (
     LinkedInPlaywrightScraper,
     SearchApiLinkedInScraper,
 )
+
+
+def upload_to_s3(local_path: str, bucket: str, prefix: str = "snapshots/") -> str:
+    s3 = boto3.client("s3")
+    ts = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%SZ")
+    prefix = prefix.rstrip("/")
+    key = f"{prefix}/jobs_{ts}.csv"
+    s3.upload_file(local_path, bucket, key)
+    print(f"[s3] uploaded: s3://{bucket}/{key}")
+    latest = f"{prefix}/latest.csv"
+    s3.upload_file(local_path, bucket, latest)
+    print(f"[s3] uploaded: s3://{bucket}/{latest}")
+    return key
 
 
 def _parse_args() -> argparse.Namespace:
@@ -82,6 +96,16 @@ def run_once(as_of: date, cfg: AppConfig) -> int:
         all_postings.extend(lv_scraper.fetch(as_of=as_of))
 
     append_postings_to_csv(all_postings, cfg.csv_path)
+    # Optional S3 upload
+    bucket = os.getenv("OUTPUT_BUCKET")
+    prefix = os.getenv("OUTPUT_PREFIX", "snapshots/")
+    if bucket:
+        try:
+            upload_to_s3(cfg.csv_path, bucket, prefix)
+        except Exception as e:
+            print(f"[s3] upload failed: {e}")
+    else:
+        print("[s3] OUTPUT_BUCKET not set; skipping upload")
     return len(all_postings)
 
 
