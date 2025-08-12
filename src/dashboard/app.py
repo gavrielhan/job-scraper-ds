@@ -7,7 +7,7 @@ import requests
 
 from sentence_transformers import SentenceTransformer, util
 from typing import List
-
+import re
 
 
 API_URL = st.secrets.get("API_URL") or os.getenv("API_URL", "")
@@ -164,12 +164,11 @@ def normalize_city(loc: str) -> str:
     t = " ".join(loc.replace("\n", " ").split()).strip(", ")
     tl = t.lower()
     # If generic country
-    if tl == "israel":
+    if tl in {"israel", "il"}:
         return "Tel Aviv-Yafo"
-    # Strip trailing country
-    if tl.endswith(", israel"):
-        t = t[:-8]
-        tl = t.lower()
+    # Strip trailing country tokens like ', Israel' or ', IL'
+    t = re.sub(r"\s*,\s*(israel|il)\s*$", "", t, flags=re.IGNORECASE)
+    tl = t.lower()
     # Tel Aviv variants
     tel_variants = ["tel aviv-yafo", "tel-aviv-yafo", "tel aviv yafo", "tel aviv", "tel-aviv"]
     if any(v in tl for v in tel_variants):
@@ -181,6 +180,9 @@ def normalize_city(loc: str) -> str:
         "ra'anana": "Ra'anana",
         "beer sheva": "Beer Sheva",
         "be'er sheva": "Beer Sheva",
+        "bnei brak": "Bnei Brak",
+        "benei brak": "Bnei Brak",
+        "bene brak": "Bnei Brak",
         "netanya": "Netanya",
         "ashdod": "Ashdod",
         "ashkelon": "Ashkelon",
@@ -192,6 +194,34 @@ def normalize_city(loc: str) -> str:
             return v
     # Default to original (without country)
     return t
+
+
+def classify_title_heuristic(title: str) -> str:
+    if not isinstance(title, str):
+        return ""
+    t = title.strip().lower()
+    if not t:
+        return ""
+    # Normalize common noise
+    t = re.sub(r"\s+\(.*?\)$", "", t)
+    # Heuristic rules
+    if "data scientist" in t:
+        return "Data Scientist"
+    if "machine learning engineer" in t or re.search(r"\bml\b.*engineer|engineer.*\bml\b", t):
+        return "Machine Learning Engineer"
+    if "ai engineer" in t:
+        return "AI Engineer"
+    if "data analyst" in t or "analytics analyst" in t:
+        return "Data Analyst"
+    if "data engineer" in t or "analytics engineer" in t:
+        return "Data Engineer"
+    if "architect" in t:
+        return "Data Architect"
+    if "research scientist" in t:
+        return "Research Scientist"
+    if "manager" in t or "lead" in t and "data" in t:
+        return "Data Science Manager"
+    return ""
 
 
 with st.sidebar:
@@ -217,8 +247,13 @@ with st.sidebar:
             model = get_embed_model(HF_SENTENCE_MODEL)
             loc_values = df.get("location", pd.Series([""] * len(df))).fillna("").astype(str).tolist()
             title_values = df.get("job_title", pd.Series([""] * len(df))).fillna("").astype(str).tolist()
-            df["city_normalized"] = normalize_strings_embed(loc_values, CITY_CANON, model, ENRICH_THRESHOLD)
-            df["title_normalized"] = normalize_strings_embed(title_values, TITLE_CANON, model, ENRICH_THRESHOLD)
+            # Cities: embed to canonical, then final cleanup with normalize_city for safety
+            city_embed = normalize_strings_embed(loc_values, CITY_CANON, model, ENRICH_THRESHOLD)
+            df["city_normalized"] = [normalize_city(c if c else lv) for c, lv in zip(city_embed, loc_values)]
+            # Titles: heuristic first, then embed fallback, else original
+            heurs = [classify_title_heuristic(t) for t in title_values]
+            embed_titles = normalize_strings_embed(title_values, TITLE_CANON, model, ENRICH_THRESHOLD)
+            df["title_normalized"] = [h or e or tv for h, e, tv in zip(heurs, embed_titles, title_values)]
         st.caption("Using self-enrichment for normalized city/title (no CSV saved)")
     sources = sorted(df["source"].dropna().unique().tolist())
     selected_sources = st.multiselect("Source", options=sources, default=sources)
@@ -288,6 +323,9 @@ if not filtered.empty:
     st.subheader("Latest snapshot")
     latest_date = filtered["collected_at"].max()
     latest = filtered[filtered["collected_at"] == latest_date].sort_values(["company", "job_title"]).reset_index(drop=True)
-    st.dataframe(latest, use_container_width=True, hide_index=True)
+    # Hide normalized helper columns in the snapshot view
+    hide_cols = ["title_normalized", "city_normalized"]
+    visible_cols = [c for c in latest.columns if c not in hide_cols]
+    st.dataframe(latest[visible_cols], use_container_width=True, hide_index=True)
 else:
     st.info("No data yet. Ensure data/jobs.csv exists in the repo or set DASHBOARD_DATA_URL to a CSV.") 
