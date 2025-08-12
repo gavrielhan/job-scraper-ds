@@ -373,7 +373,7 @@ with st.sidebar:
                 else:
                     st.error(f"Failed: {resp.status_code}")
                 st.code(resp.text, language="json")
-    else:
+    elif ENABLE_FETCH and not API_URL:
         st.warning("Set API_URL in Streamlit secrets to enable fetching.")
 
 
