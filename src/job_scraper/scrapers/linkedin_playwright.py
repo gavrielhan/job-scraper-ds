@@ -351,6 +351,16 @@ class LinkedInPlaywrightScraper(ScraperBase):
             else:
                 context = browser.new_context()
 
+            # Aggressively kill LinkedIn modal overlays on every page in this context
+            context.add_init_script("""
+(() => {
+  const kill = () => ['.top-level-modal-container','.modal__overlay','[class*="overlay"]']
+    .forEach(sel => document.querySelectorAll(sel).forEach(el => el.remove()));
+  kill();
+  setInterval(kill, 500);
+})();
+""")
+
             page = context.new_page()
             page.set_default_timeout(90_000)
 
@@ -461,82 +471,43 @@ class LinkedInPlaywrightScraper(ScraperBase):
                         except Exception:
                             pass
 
-                        # Click and wait for detail
-                        try:
-                            card.click()
-                            page.wait_for_timeout(500)
-                            try:
-                                page.wait_for_selector("h1.jobs-unified-top-card__job-title, .jobs-unified-top-card, .topcard", timeout=5000)
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
+                        # Open each job directly; do not click list cards (avoid overlay)
                         detail_title_raw = ""
+                        company = (company_raw or "").strip()
+                        loc = ""
                         try:
-                            detail_title_el = page.query_selector("h1.jobs-unified-top-card__job-title, h1.topcard__title")
-                            if detail_title_el:
-                                detail_title_raw = detail_title_el.inner_text().strip()
-                        except Exception:
-                            pass
-                        # Try JSON extraction first
-                        json_company_raw = _extract_company_from_json(page)
-                        # Fallback to topcard text
-                        detail_company_raw = json_company_raw or _extract_company_from_topcard(page)
-
-                        if self.debug:
-                            print(json.dumps({
-                                "debug_source": "LinkedInPlaywright",
-                                "card": {"title_raw": title_raw, "company_raw": company_raw, "link_raw": link_raw},
-                                "detail": {"title_raw": detail_title_raw, "company_raw": detail_company_raw, "json_company_raw": json_company_raw},
-                            }, ensure_ascii=False))
-
-                        # Processed values
-                        title = _normalize_title(detail_title_raw or title_raw)
-                        company = (detail_company_raw or company_raw or "").strip()
-                        # Location extraction
-                        loc = _extract_location_from_json(page) or _extract_location_from_topcard(page)
-
-                        # Last resort: open job URL directly
-                        if not company:
+                            details = context.new_page()
+                            details.set_default_timeout(30000)
+                            details.goto(url, timeout=30000)
                             try:
-                                details_page = context.new_page()
-                                details_page.set_default_timeout(20000)
-                                details_page.goto(url, timeout=20000)
-                                try:
-                                    details_page.wait_for_selector(".jobs-unified-top-card, .topcard", timeout=5000)
-                                except Exception:
-                                    pass
-                                comp2 = _extract_company_from_json(details_page) or _extract_company_from_topcard(details_page)
-                                if self.debug:
-                                    print(json.dumps({"debug_source":"LinkedInPlaywright","direct_open_company_raw":comp2,"url":url}, ensure_ascii=False))
-                                if comp2:
-                                    company = comp2
-                                # Try location too
-                                if not loc:
-                                    loc2 = _extract_location_from_json(details_page) or _extract_location_from_topcard(details_page)
-                                    if loc2:
-                                        loc = loc2
+                                details.wait_for_selector(".jobs-unified-top-card, .topcard", timeout=8000)
                             except Exception:
                                 pass
-                            finally:
-                                try:
-                                    details_page.close()
-                                except Exception:
-                                    pass
+                            # title
+                            el = details.query_selector("h1.jobs-unified-top-card__job-title, h1.topcard__title")
+                            if el:
+                                detail_title_raw = (el.inner_text() or "").strip()
+                            # company & location via JSON/topcard helpers
+                            company2 = _extract_company_from_json(details) or _extract_company_from_topcard(details)
+                            if company2:
+                                company = company2
+                            loc2 = _extract_location_from_json(details) or _extract_location_from_topcard(details)
+                            if loc2:
+                                loc = loc2
+                            # guest fallbacks
+                            if not company:
+                                company = _extract_company_from_guest_endpoint(context, url) or company
+                            if not loc:
+                                loc = _extract_location_from_guest_endpoint(context, url) or loc
+                        finally:
+                            try:
+                                details.close()
+                            except Exception:
+                                pass
 
-                        # Guest endpoint fallback (no login content)
-                        if not company:
-                            comp3 = _extract_company_from_guest_endpoint(context, url)
-                            if self.debug:
-                                print(json.dumps({"debug_source":"LinkedInPlaywright","guest_endpoint_company_raw":comp3,"url":url}, ensure_ascii=False))
-                            if comp3:
-                                company = comp3
-                        if not loc:
-                            loc3 = _extract_location_from_guest_endpoint(context, url)
-                            if self.debug:
-                                print(json.dumps({"debug_source":"LinkedInPlaywright","guest_endpoint_location_raw":loc3,"url":url}, ensure_ascii=False))
-                            if loc3:
-                                loc = loc3
+                        # processed values
+                        title = _normalize_title(detail_title_raw or title_raw)
+                        # company, loc already best-effort populated above
 
                         seen_links.add(url)
                         jobs.append(
