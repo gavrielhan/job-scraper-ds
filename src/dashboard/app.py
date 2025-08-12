@@ -24,14 +24,17 @@ S3_BUCKET = st.secrets.get("S3_BUCKET", "")
 S3_PREFIX = st.secrets.get("S3_PREFIX", "snapshots/")
 # Optional: perform in-memory enrichment instead of relying on jobs_enriched.csv
 SELF_ENRICH = os.environ.get("SELF_ENRICH", "").strip().lower() in {"1", "true", "yes", "on"}
+SELF_ENRICH_MODE = os.environ.get("SELF_ENRICH_MODE", "embed").strip().lower()  # "embed" or "flan"
 ENRICH_THRESHOLD = float(os.environ.get("ENRICH_THRESHOLD", "0.55"))
 HF_SENTENCE_MODEL = os.environ.get("HF_SENTENCE_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+HF_T2T_MODEL = os.environ.get("HF_T2T_MODEL", "google/flan-t5-small")
 # Canonical label sets used for normalization
 CITY_CANON = [
     "Tel Aviv-Yafo",
     "Jerusalem",
     "Haifa",
     "Herzliya",
+    "Ramat Gan",
     "Ra'anana",
     "Beer Sheva",
     "Netanya",
@@ -134,6 +137,15 @@ def get_embed_model(model_name: str) -> SentenceTransformer:
     return SentenceTransformer(model_name)
 
 
+@st.cache_resource(show_spinner=False)
+def get_t2t_pipeline(model_name: str):
+    try:
+        from transformers import pipeline  # lazy import
+    except Exception as e:
+        raise RuntimeError("transformers is not installed; add it to requirements or switch SELF_ENRICH_MODE=embed") from e
+    return pipeline("text2text-generation", model=model_name, device=-1)
+
+
 def normalize_strings_embed(values: List[str], canon_list: List[str], model: SentenceTransformer, threshold: float) -> List[str]:
     emb_canon = model.encode(canon_list, convert_to_tensor=True, normalize_embeddings=True)
     out: List[str] = []
@@ -147,6 +159,29 @@ def normalize_strings_embed(values: List[str], canon_list: List[str], model: Sen
         idx = int(sim.argmax())
         score = float(sim[idx])
         out.append(canon_list[idx] if score >= threshold else txt)
+    return out
+
+
+def normalize_strings_flan(values: List[str], canon_list: List[str], gen) -> List[str]:
+    labels = ", ".join(canon_list)
+    out: List[str] = []
+    for v in values:
+        txt = (v or "").strip()
+        if not txt:
+            out.append("")
+            continue
+        prompt = (
+            "You are a strict classifier. Choose exactly one label from this list: ["
+            + labels
+            + "]. Only output the label text, no punctuation, no extra words.\nInput: "
+            + txt
+        )
+        try:
+            resp = gen(prompt, max_new_tokens=8)
+            pred = (resp[0]["generated_text"] or "").strip()
+            out.append(pred if pred in canon_list else txt)
+        except Exception:
+            out.append(txt)
     return out
 
 
@@ -244,17 +279,33 @@ with st.sidebar:
     # If no enriched columns present and SELF_ENRICH is enabled, compute in-memory
     if SELF_ENRICH and ("city_normalized" not in df.columns or "title_normalized" not in df.columns):
         with st.spinner("Enriching locations and titles in-memory…"):
-            model = get_embed_model(HF_SENTENCE_MODEL)
             loc_values = df.get("location", pd.Series([""] * len(df))).fillna("").astype(str).tolist()
             title_values = df.get("job_title", pd.Series([""] * len(df))).fillna("").astype(str).tolist()
-            # Cities: embed to canonical, then final cleanup with normalize_city for safety
-            city_embed = normalize_strings_embed(loc_values, CITY_CANON, model, ENRICH_THRESHOLD)
-            df["city_normalized"] = [normalize_city(c if c else lv) for c, lv in zip(city_embed, loc_values)]
-            # Titles: heuristic first, then embed fallback, else original
-            heurs = [classify_title_heuristic(t) for t in title_values]
-            embed_titles = normalize_strings_embed(title_values, TITLE_CANON, model, ENRICH_THRESHOLD)
-            df["title_normalized"] = [h or e or tv for h, e, tv in zip(heurs, embed_titles, title_values)]
-        st.caption("Using self-enrichment for normalized city/title (no CSV saved)")
+            if SELF_ENRICH_MODE == "flan":
+                try:
+                    gen = get_t2t_pipeline(HF_T2T_MODEL)
+                    city_llm = normalize_strings_flan(loc_values, CITY_CANON, gen)
+                    title_llm = normalize_strings_flan(title_values, TITLE_CANON, gen)
+                    df["city_normalized"] = [normalize_city(c if c else lv) for c, lv in zip(city_llm, loc_values)]
+                    # Apply heuristic as a final pass to collapse verbose variants
+                    df["title_normalized"] = [classify_title_heuristic(t) or t for t in title_llm]
+                except Exception as e:
+                    st.warning(f"LLM enrich failed ({e}); falling back to embeddings")
+                    model = get_embed_model(HF_SENTENCE_MODEL)
+                    city_embed = normalize_strings_embed(loc_values, CITY_CANON, model, ENRICH_THRESHOLD)
+                    df["city_normalized"] = [normalize_city(c if c else lv) for c, lv in zip(city_embed, loc_values)]
+                    heurs = [classify_title_heuristic(t) for t in title_values]
+                    embed_titles = normalize_strings_embed(title_values, TITLE_CANON, model, ENRICH_THRESHOLD)
+                    df["title_normalized"] = [h or e or tv for h, e, tv in zip(heurs, embed_titles, title_values)]
+            else:
+                model = get_embed_model(HF_SENTENCE_MODEL)
+                city_embed = normalize_strings_embed(loc_values, CITY_CANON, model, ENRICH_THRESHOLD)
+                df["city_normalized"] = [normalize_city(c if c else lv) for c, lv in zip(city_embed, loc_values)]
+                heurs = [classify_title_heuristic(t) for t in title_values]
+                embed_titles = normalize_strings_embed(title_values, TITLE_CANON, model, ENRICH_THRESHOLD)
+                df["title_normalized"] = [h or e or tv for h, e, tv in zip(heurs, embed_titles, title_values)]
+        mode_label = "FLAN-T5" if SELF_ENRICH_MODE == "flan" else "embeddings"
+        st.caption(f"Using self-enrichment ({mode_label}) for normalized city/title (no CSV saved)")
     sources = sorted(df["source"].dropna().unique().tolist())
     selected_sources = st.multiselect("Source", options=sources, default=sources)
 
