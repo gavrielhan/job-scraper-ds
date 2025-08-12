@@ -165,23 +165,44 @@ def normalize_strings_embed(values: List[str], canon_list: List[str], model: Sen
 def normalize_strings_flan(values: List[str], canon_list: List[str], gen) -> List[str]:
     labels = ", ".join(canon_list)
     out: List[str] = []
+    instruction = (
+        "Classify the job title into EXACTLY ONE of these labels: [" + labels + "]. "
+        "Rules: If the title contains 'research data scientist' choose 'Data Scientist'. "
+        "If it contains 'data scientist' choose 'Data Scientist'. "
+        "If it contains 'machine learning engineer' or 'ml engineer' choose 'Machine Learning Engineer'. "
+        "If it contains 'ai engineer' choose 'AI Engineer'. "
+        "If it contains 'data analyst' choose 'Data Analyst'. "
+        "If it contains 'data engineer' or 'analytics engineer' choose 'Data Engineer'. "
+        "If it contains 'architect' choose 'Data Architect'. "
+        "If it contains 'research scientist' (without 'data') choose 'Research Scientist'. "
+        "If it contains 'manager', 'lead', 'head' and the role is in data/ai/ml, choose 'Data Science Manager'. "
+        "If the role is unrelated to data/ai/ml (e.g., developer advocate, growth, marketing, acquisition, sales, product manager), choose 'Other'. "
+        "Output ONLY the label text."
+    )
+    examples = [
+        ("Research Data Scientist, Waze Personalized Experience", "Data Scientist"),
+        ("Senior Machine Learning Engineer (GenAI)", "Machine Learning Engineer"),
+        ("AI Engineer", "AI Engineer"),
+        ("Applied Data Scientist", "Data Scientist"),
+        ("Data Engineer II - GenAI", "Data Engineer"),
+        ("Head of Data Science", "Data Science Manager"),
+        ("Developer Advocate, GenAI", "Other"),
+        ("User Acquisition Team Lead - Paid Social", "Other"),
+        ("Product AI Lab Team Lead", "Data Science Manager"),
+    ]
+    shots = "\n".join([f"Title: {t}\nLabel: {y}" for t, y in examples])
     for v in values:
         txt = (v or "").strip()
         if not txt:
             out.append("")
             continue
-        prompt = (
-            "You are a strict classifier. Choose exactly one label from this list: ["
-            + labels
-            + "]. Only output the label text, no punctuation, no extra words.\nInput: "
-            + txt
-        )
+        prompt = instruction + "\n" + shots + "\nTitle: " + txt + "\nLabel:"
         try:
             resp = gen(prompt, max_new_tokens=8)
             pred = (resp[0]["generated_text"] or "").strip()
-            out.append(pred if pred in canon_list else txt)
+            out.append(pred if pred in canon_list else "Other")
         except Exception:
-            out.append(txt)
+            out.append("Other")
     return out
 
 
@@ -345,7 +366,7 @@ if not filtered.empty:
 
     # Titles pie (apply heuristic mapper even when normalized present)
     base_title = filtered["title_normalized"] if "title_normalized" in filtered.columns else filtered["job_title"]
-    title_series = base_title.fillna("Unknown").map(lambda t: classify_title_heuristic(t) or t)
+    title_series = base_title.fillna("").map(lambda t: classify_title_heuristic(t) or "Other")
     title_counts = title_series.value_counts().reset_index()
     title_counts.columns = ["job_title", "count"]
     top_n = 12
