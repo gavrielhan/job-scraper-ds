@@ -28,8 +28,17 @@ REMOTE_CSV = os.environ.get("DASHBOARD_DATA_URL", DEFAULT_REMOTE_CSV)
 ENABLE_FETCH = os.environ.get("ENABLE_FETCH_BUTTON", "").strip().lower() in {"1", "true", "yes", "on"}
 # Optional: read data from S3 directly (private bucket) if enabled
 USE_S3 = os.environ.get("USE_S3", "").strip().lower() in {"1", "true", "yes", "on"}
-S3_BUCKET = st.secrets.get("S3_BUCKET", "")
-S3_PREFIX = st.secrets.get("S3_PREFIX", "snapshots/")
+# Prefer OUTPUT_* for consistency with runner/Lambda, then fall back to legacy S3_* secrets
+S3_BUCKET = (
+    os.getenv("OUTPUT_BUCKET")
+    or st.secrets.get("OUTPUT_BUCKET")
+    or st.secrets.get("S3_BUCKET", "")
+)
+S3_PREFIX = (
+    os.getenv("OUTPUT_PREFIX")
+    or st.secrets.get("OUTPUT_PREFIX")
+    or st.secrets.get("S3_PREFIX", "snapshots/")
+)
 # Countdown config (read next_run.json from S3) — prefer OUTPUT_* then secrets fallbacks
 AWS_REGION = os.getenv("AWS_REGION", st.secrets.get("AWS_DEFAULT_REGION", "us-east-1"))
 S3_META_BUCKET = (
@@ -132,15 +141,25 @@ def load_data(path: str, remote_url: str, enriched_path: str) -> pd.DataFrame:
                 region_name=st.secrets.get("AWS_DEFAULT_REGION", "us-east-1"),
                 config=Config(retries={"max_attempts": 5, "mode": "standard"}),
             )
-            # Prefer jobs_latest.csv; otherwise newest *.csv
-            latest_key = f"{S3_PREFIX}jobs_latest.csv"
-            try:
-                obj = s3.get_object(Bucket=S3_BUCKET, Key=latest_key)
-                df = pd.read_csv(obj["Body"])
-            except Exception:
+            # Prefer stable keys; otherwise newest *.csv
+            prefix = S3_PREFIX if S3_PREFIX.endswith("/") else (S3_PREFIX + "/")
+            stable_candidates = [
+                f"{prefix}latest.csv",
+                f"{prefix}jobs_latest.csv",
+                f"{prefix}latest/jobs.csv",
+            ]
+            df = None
+            for latest_key in stable_candidates:
+                try:
+                    obj = s3.get_object(Bucket=S3_BUCKET, Key=latest_key)
+                    df = pd.read_csv(obj["Body"])
+                    break
+                except Exception:
+                    df = None
+            if df is None:
                 paginator = s3.get_paginator("list_objects_v2")
                 newest_key, newest_ts = None, None
-                for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=S3_PREFIX):
+                for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
                     for o in page.get("Contents", []):
                         if o["Key"].endswith(".csv") and (newest_ts is None or o["LastModified"] > newest_ts):
                             newest_key, newest_ts = o["Key"], o["LastModified"]
