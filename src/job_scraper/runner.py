@@ -3,11 +3,14 @@ import argparse
 from datetime import date, datetime
 from typing import List
 import os
+import io
+import pandas as pd
 import boto3
+from botocore.exceptions import ClientError
 
 from .config import AppConfig, ensure_dirs, load_sources_config
 from .models import JobPosting
-from .storage import append_postings_to_csv
+from .storage import append_postings_to_csv, COLUMNS
 from .scrapers import (
     GreenhouseScraper,
     LeverScraper,
@@ -17,17 +20,33 @@ from .scrapers import (
 )
 
 
-def upload_to_s3(local_path: str, bucket: str, prefix: str = "snapshots/") -> str:
+def append_to_s3_aggregate(df_run: pd.DataFrame) -> None:
+    bucket = os.getenv("OUTPUT_BUCKET")
+    prefix = os.getenv("OUTPUT_PREFIX", "")
+    if not bucket:
+        return
+    key = f"{prefix}latest.csv" if prefix.endswith("/") else f"{prefix}/latest.csv" if prefix else "latest.csv"
     s3 = boto3.client("s3")
-    ts = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%SZ")
-    prefix = prefix.rstrip("/")
-    key = f"{prefix}/jobs_{ts}.csv"
-    s3.upload_file(local_path, bucket, key)
-    print(f"[s3] uploaded: s3://{bucket}/{key}")
-    latest = f"{prefix}/latest.csv"
-    s3.upload_file(local_path, bucket, latest)
-    print(f"[s3] uploaded: s3://{bucket}/{latest}")
-    return key
+    # Read existing aggregate if any
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        df_prev = pd.read_csv(obj["Body"])  # type: ignore[arg-type]
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code")
+        if code in ("NoSuchKey", "404"):
+            df_prev = pd.DataFrame(columns=df_run.columns)
+        else:
+            raise
+    # Append + de-dupe on (url, collected_at)
+    df_all = pd.concat([df_prev, df_run], ignore_index=True)
+    if {"url", "collected_at"}.issubset(df_all.columns):
+        df_all.drop_duplicates(subset=["url", "collected_at"], inplace=True)
+    else:
+        df_all.drop_duplicates(inplace=True)
+    # Write back
+    buf = io.StringIO()
+    df_all.to_csv(buf, index=False)
+    s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue(), ContentType="text/csv", CacheControl="no-cache")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -96,16 +115,13 @@ def run_once(as_of: date, cfg: AppConfig) -> int:
         all_postings.extend(lv_scraper.fetch(as_of=as_of))
 
     append_postings_to_csv(all_postings, cfg.csv_path)
-    # Optional S3 upload
-    bucket = os.getenv("OUTPUT_BUCKET")
-    prefix = os.getenv("OUTPUT_PREFIX", "snapshots/")
-    if bucket:
-        try:
-            upload_to_s3(cfg.csv_path, bucket, prefix)
-        except Exception as e:
-            print(f"[s3] upload failed: {e}")
-    else:
-        print("[s3] OUTPUT_BUCKET not set; skipping upload")
+    # Append this run to S3 aggregate latest.csv (if configured)
+    try:
+        df_run = pd.DataFrame([p.to_row() for p in all_postings], columns=COLUMNS)
+        if not df_run.empty:
+            append_to_s3_aggregate(df_run)
+    except Exception as e:
+        print(f"[s3] aggregate append failed: {e}")
     return len(all_postings)
 
 
