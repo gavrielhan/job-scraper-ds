@@ -213,13 +213,35 @@ def get_embed_model(model_name: str) -> SentenceTransformer:
     return SentenceTransformer(model_name)
 
 
-@st.cache_resource(show_spinner=False)
-def get_t2t_pipeline(model_name: str):
-    try:
-        from transformers import pipeline  # lazy import
-    except Exception as e:
-        raise RuntimeError("transformers is not installed; add it to requirements or switch SELF_ENRICH_MODE=embed") from e
-    return pipeline("text2text-generation", model=model_name, device=-1)
+@st.cache_data(ttl=3600, show_spinner=False)
+def canonicalize_titles_cached(titles: List[str], model_name: str, threshold: float) -> List[str]:
+    # Deduplicate while preserving order
+    unique: List[str] = []
+    seen = set()
+    for t in titles:
+        t0 = (t or "").strip()
+        if t0 not in seen:
+            seen.add(t0)
+            unique.append(t0)
+    # Heuristic first
+    mapping = {u: (classify_title_heuristic(u) or "") for u in unique}
+    missing = [u for u in unique if not mapping[u]]
+    if missing:
+        try:
+            model = get_embed_model(model_name)
+            emb_canon = model.encode(TITLE_CANON, convert_to_tensor=True, normalize_embeddings=True)
+            emb = model.encode(missing, convert_to_tensor=True, normalize_embeddings=True)
+            from sentence_transformers import util as st_util
+            sims = st_util.cos_sim(emb, emb_canon)
+            for i, u in enumerate(missing):
+                idx = int(sims[i].argmax())
+                score = float(sims[i][idx])
+                mapping[u] = TITLE_CANON[idx] if score >= threshold else "Other"
+        except Exception:
+            for u in missing:
+                mapping[u] = "Other"
+    # Build result list preserving original order
+    return [mapping.get((t or "").strip(), "Other") for t in titles]
 
 
 def normalize_strings_embed(values: List[str], canon_list: List[str], model: SentenceTransformer, threshold: float) -> List[str]:
@@ -405,8 +427,11 @@ with st.sidebar:
     if not next_dt:
         st.caption("No schedule found yet. It will appear after the first scheduled run writes metadata.")
     else:
-        # Auto-rerun every 1s so the timer ticks
-        st_autorefresh(interval=1000, key="next-fetch-ticker")
+        # Auto-refresh less aggressively until close to target
+        if remaining <= 60:
+            st_autorefresh(interval=1000, key="next-fetch-ticker")
+        elif remaining <= 600:
+            st_autorefresh(interval=5000, key="next-fetch-ticker")
         tz = ZoneInfo("Asia/Jerusalem")
         target = next_dt.astimezone(tz) if next_dt.tzinfo else next_dt.replace(tzinfo=timezone.utc).astimezone(tz)
         now = datetime.now(timezone.utc).astimezone(tz)
@@ -507,29 +532,9 @@ if not filtered.empty:
     fig_loc.update_layout(xaxis_title="Location", yaxis_ticksuffix="%", uniformtext_minsize=10, uniformtext_mode="hide")
     dist_col1.plotly_chart(fig_loc, use_container_width=True)
 
-    # Titles pie (apply canonical mapping so categories are stable)
-    raw_titles = filtered["job_title"].fillna("")
-    # Heuristic pass
-    heur = raw_titles.map(lambda t: classify_title_heuristic(t) or "")
-    # Optional hint from title_normalized if present and already canonical
-    hint = None
-    if "title_normalized" in filtered.columns:
-        tnorm = filtered["title_normalized"].fillna("")
-        hint = tnorm.map(lambda x: x if x in TITLE_CANON else "")
-    # Embedding fallback into canonical label set
-    try:
-        model = get_embed_model(HF_SENTENCE_MODEL)
-        embed_titles = normalize_strings_embed(raw_titles.tolist(), TITLE_CANON, model, ENRICH_THRESHOLD)
-    except Exception:
-        embed_titles = [""] * len(raw_titles)
-    def to_final(i: int) -> str:
-        if heur.iloc[i]:
-            return heur.iloc[i]
-        if hint is not None and hint.iloc[i]:
-            return hint.iloc[i]
-        e = embed_titles[i]
-        return e if e in TITLE_CANON else "Other"
-    title_series = pd.Series([to_final(i) for i in range(len(raw_titles))])
+    # Titles pie (apply canonical mapping so categories are stable) — batch + cached
+    raw_titles = filtered["job_title"].fillna("").astype(str).tolist()
+    title_series = pd.Series(canonicalize_titles_cached(raw_titles, HF_SENTENCE_MODEL, ENRICH_THRESHOLD))
     title_counts = title_series.value_counts().reset_index()
     title_counts.columns = ["job_title", "count"]
     top_n = 12
