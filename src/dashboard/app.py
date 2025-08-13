@@ -485,12 +485,14 @@ if not filtered.empty:
     fig = px.line(by_day, x="collected_at", y="count", markers=True, title="Open positions over time")
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Latest snapshot")
-    latest_date = filtered["collected_at"].max()
-    latest = filtered[filtered["collected_at"] == latest_date].sort_values(["company", "job_title"]).reset_index(drop=True)
-    # Hide normalized helper columns in the snapshot view
+    st.subheader("All postings (newest first)")
+    all_posts = (
+        filtered.sort_values(["collected_at", "company", "job_title"], ascending=[False, True, True])
+        .reset_index(drop=True)
+    )
+    # Hide normalized helper columns in the table view
     hide_cols = ["title_normalized", "city_normalized"]
-    visible_cols = [c for c in latest.columns if c not in hide_cols]
-    st.dataframe(latest[visible_cols], use_container_width=True, hide_index=True)
+    visible_cols = [c for c in all_posts.columns if c not in hide_cols]
+    st.dataframe(all_posts[visible_cols], use_container_width=True, hide_index=True)
 else:
     st.info("No data yet. Ensure data/jobs.csv exists in the repo or set DASHBOARD_DATA_URL to a CSV.") 
