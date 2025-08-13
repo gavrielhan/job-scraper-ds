@@ -427,15 +427,15 @@ with st.sidebar:
     if not next_dt:
         st.caption("No schedule found yet. It will appear after the first scheduled run writes metadata.")
     else:
+        tz = ZoneInfo("Asia/Jerusalem")
+        target = next_dt.astimezone(tz) if next_dt.tzinfo else next_dt.replace(tzinfo=timezone.utc).astimezone(tz)
+        now = datetime.now(timezone.utc).astimezone(tz)
+        remaining = (target - now).total_seconds()
         # Auto-refresh less aggressively until close to target
         if remaining <= 60:
             st_autorefresh(interval=1000, key="next-fetch-ticker")
         elif remaining <= 600:
             st_autorefresh(interval=5000, key="next-fetch-ticker")
-        tz = ZoneInfo("Asia/Jerusalem")
-        target = next_dt.astimezone(tz) if next_dt.tzinfo else next_dt.replace(tzinfo=timezone.utc).astimezone(tz)
-        now = datetime.now(timezone.utc).astimezone(tz)
-        remaining = (target - now).total_seconds()
         if remaining <= 0:
             st.success(f"Next fetch is due now (scheduled for {target:%Y-%m-%d %H:%M:%S %Z}) 🚀")
             # Force next rerun to fetch fresh schedule from S3
