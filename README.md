@@ -1,6 +1,6 @@
 # Job Scraper DS
 
-Automated system to collect and present data on open Data Scientist positions in Israel.
+Automated collection + dashboard of open Data Scientist roles in Israel.
 
 **Live demo**: https://job-scraper-ds-k24kqrim98fqo8zvskeuea.streamlit.app/
 
@@ -9,22 +9,26 @@ Automated system to collect and present data on open Data Scientist positions in
 ![Dashboard](platform.png)
 
 ## Features
-- Scrapes every run from multiple sources (configurable)
-  - Greenhouse boards API (no API key)
-  - Lever postings API (no API key)
-  - Optional: LinkedIn via SerpAPI Google Jobs (requires API key)
-  - Optional: LinkedIn via SearchApi.io Google Jobs (requires API key)
-  - Optional: LinkedIn via Playwright with your credentials (headless browser)
-- Appends to a dynamic CSV with columns: `source, job_title, company, location, url, collected_at`
-- Interactive Streamlit dashboard with filters and trend over time
-- Ready for cron or ad-hoc scheduling
+ - Pluggable scrapers:
+    - Greenhouse (API, no key)
+    - Lever (API, no key)
+    - LinkedIn via SerpAPI or SearchApi.io (Google Jobs; API key)
+    - LinkedIn via Playwright (headless Chromium + storage state)
+
+ - Appends to a CSV with columns: source, job_title, company, location, url, collected_at
+ - Streamlit dashboard: filters, trends, and a countdown to the next scheduled run
+ - Cloud-ready: S3 storage, ECS Fargate runner, Lambda trigger, EventBridge schedule
+
+
 
 ## Quickstart
-1. Clone and enter the repo, then setup:
+1. Setup:
    ```bash
+   git clone https://github.com/gavrielhan/job-scraper-ds
+   cd job-scraper-ds
    bash scripts/setup.sh
    ```
-2. Create `.env` in the repo root (or use the pre-created one) and set values as needed:
+2. Create `.env` in the repo root:
    ```env
    # Timezone
    TZ=Asia/Jerusalem
@@ -57,8 +61,8 @@ Automated system to collect and present data on open Data Scientist positions in
    SCHEDULE_HOURS=12
    NEXT_RUN_REFRESH_SECS=36000  # 10h
    ```
-3. Configure sources in `config/sources.yaml` (edit company slugs and enable/disable sources).
-4. Run a scrape (today):
+3. Configure sources in `config/sources.yaml` (edit to enable/disbale sources).
+4. Run a scrape:
    ```bash
    python -m src.job_scraper.runner
    ```
