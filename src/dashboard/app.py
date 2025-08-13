@@ -331,28 +331,71 @@ def normalize_city(loc: str) -> str:
 def classify_title_heuristic(title: str) -> str:
     if not isinstance(title, str):
         return ""
-    t = title.strip().lower()
+    t_raw = title.strip()
+    t = t_raw.lower()
     if not t:
         return ""
     # Normalize common noise
     t = re.sub(r"\s+\(.*?\)$", "", t)
-    # Heuristic rules
-    if "data scientist" in t:
+    # Helper matchers
+    def has(*words: str) -> bool:
+        return all(w in t for w in words)
+    def any_re(patterns: list[str]) -> bool:
+        return any(re.search(p, t) for p in patterns)
+
+    # Leadership / management (prioritize before DS catch-alls)
+    if any_re([r"\b(head|lead|manager|director|vp)\b"]) and any_re([r"\bdata\b|\bai\b|\bml\b|\banalytic"]):
+        return "Data Science Manager"
+
+    # Data Scientist family
+    if (
+        "data scientist" in t
+        or "applied data scientist" in t
+        or "machine learning scientist" in t
+        or "research data scientist" in t
+        or any_re([r"\bapplied scientist\b", r"\bquant\w* scientist\b", r"\bcomput(ational|er) scientist\b"])  # applied/quant/computational
+    ):
         return "Data Scientist"
-    if "machine learning engineer" in t or re.search(r"\bml\b.*engineer|engineer.*\bml\b", t):
+
+    # Machine Learning Engineer family (incl. deep learning / CV / NLP / MLOps / research engineer)
+    if (
+        any_re([
+            r"\bml\b[^a-zA-Z]*eng", r"machine learning engineer", r"ml engineer", r"ml software engineer",
+            r"deep learning engineer", r"computer vision( engineer|)\b|\bcv engineer\b", r"nlp engineer",
+            r"ai/ml engineer", r"gen(erative)? ai engineer", r"genai engineer", r"ml developer|ai/ml developer",
+            r"mlops\b|ml ops|ml platform|ml infrastructure", r"research engineer\b"
+        ])
+    ):
         return "Machine Learning Engineer"
-    if "ai engineer" in t:
+
+    # AI Engineer (general AI that is not clearly ML Eng)
+    if any_re([r"\bai engineer\b", r"\bgen(erative)? ai\b", r"\bai specialist\b", r"\bai developer\b"]) and "ml" not in t:
         return "AI Engineer"
-    if "data analyst" in t or "analytics analyst" in t:
-        return "Data Analyst"
-    if "data engineer" in t or "analytics engineer" in t:
+
+    # Data Engineer family
+    if any_re([r"\bdata engineer\b", r"\banalytics engineer\b", r"etl engineer\b", r"data platform\b", r"data infra"]):
         return "Data Engineer"
-    if "architect" in t:
+
+    # Data Analyst family
+    if any_re([r"\bdata analyst\b", r"business analyst\b", r"product analyst\b", r"analytics? analyst\b"]):
+        return "Data Analyst"
+
+    # Architect
+    if "architect" in t and any_re([r"\bdata\b", r"\bai\b", r"\bml\b", r"analytics"]):
         return "Data Architect"
+
+    # Research Scientist
     if "research scientist" in t:
         return "Research Scientist"
-    if "manager" in t or "lead" in t and "data" in t:
-        return "Data Science Manager"
+
+    # Default: try lightweight fallbacks
+    if "scientist" in t:
+        return "Data Scientist"
+    if any_re([r"\bml\b", r"machine learning\b"]) and "engineer" in t:
+        return "Machine Learning Engineer"
+    if "analyst" in t:
+        return "Data Analyst"
+
     return ""
 
 
