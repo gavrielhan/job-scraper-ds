@@ -6,7 +6,7 @@ Automated collection + dashboard of open Data Scientist roles in Israel.
 
 **Screenshot**:
 
-![Dashboard](platform.png)
+![Dashboard](platform_1.png)
 
 ## Features
  - Pluggable scrapers:
