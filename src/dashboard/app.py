@@ -507,9 +507,29 @@ if not filtered.empty:
     fig_loc.update_layout(xaxis_title="Location", yaxis_ticksuffix="%", uniformtext_minsize=10, uniformtext_mode="hide")
     dist_col1.plotly_chart(fig_loc, use_container_width=True)
 
-    # Titles pie (apply heuristic mapper even when normalized present)
-    base_title = filtered["title_normalized"] if "title_normalized" in filtered.columns else filtered["job_title"]
-    title_series = base_title.fillna("").map(lambda t: classify_title_heuristic(t) or "Other")
+    # Titles pie (apply canonical mapping so categories are stable)
+    raw_titles = filtered["job_title"].fillna("")
+    # Heuristic pass
+    heur = raw_titles.map(lambda t: classify_title_heuristic(t) or "")
+    # Optional hint from title_normalized if present and already canonical
+    hint = None
+    if "title_normalized" in filtered.columns:
+        tnorm = filtered["title_normalized"].fillna("")
+        hint = tnorm.map(lambda x: x if x in TITLE_CANON else "")
+    # Embedding fallback into canonical label set
+    try:
+        model = get_embed_model(HF_SENTENCE_MODEL)
+        embed_titles = normalize_strings_embed(raw_titles.tolist(), TITLE_CANON, model, ENRICH_THRESHOLD)
+    except Exception:
+        embed_titles = [""] * len(raw_titles)
+    def to_final(i: int) -> str:
+        if heur.iloc[i]:
+            return heur.iloc[i]
+        if hint is not None and hint.iloc[i]:
+            return hint.iloc[i]
+        e = embed_titles[i]
+        return e if e in TITLE_CANON else "Other"
+    title_series = pd.Series([to_final(i) for i in range(len(raw_titles))])
     title_counts = title_series.value_counts().reset_index()
     title_counts.columns = ["job_title", "count"]
     top_n = 12
