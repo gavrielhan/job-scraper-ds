@@ -144,6 +144,7 @@ def load_data(path: str, remote_url: str, enriched_path: str) -> pd.DataFrame:
             # Prefer stable keys; otherwise newest *.csv
             prefix = S3_PREFIX if S3_PREFIX.endswith("/") else (S3_PREFIX + "/")
             stable_candidates = [
+                f"{prefix}archive.csv",
                 f"{prefix}latest.csv",
                 f"{prefix}jobs_latest.csv",
                 f"{prefix}latest/jobs.csv",

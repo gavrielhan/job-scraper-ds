@@ -20,33 +20,40 @@ from .scrapers import (
 )
 
 
-def append_to_s3_aggregate(df_run: pd.DataFrame) -> None:
+def append_to_s3_archive(df_run: pd.DataFrame) -> None:
     bucket = os.getenv("OUTPUT_BUCKET")
-    prefix = os.getenv("OUTPUT_PREFIX", "")
+    prefix = os.getenv("OUTPUT_PREFIX", "snapshots/")
     if not bucket:
         return
-    key = f"{prefix}latest.csv" if prefix.endswith("/") else f"{prefix}/latest.csv" if prefix else "latest.csv"
+    # Normalize prefix
+    if prefix and not prefix.endswith("/"):
+        prefix = prefix + "/"
+    key = f"{prefix}archive.csv"
+
     s3 = boto3.client("s3")
-    # Read existing aggregate if any
+    # Load existing aggregate if present
     try:
         obj = s3.get_object(Bucket=bucket, Key=key)
-        df_prev = pd.read_csv(obj["Body"])  # type: ignore[arg-type]
+        df_prev = pd.read_csv(io.BytesIO(obj["Body"].read()))  # type: ignore[arg-type]
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code")
         if code in ("NoSuchKey", "404"):
             df_prev = pd.DataFrame(columns=df_run.columns)
         else:
             raise
-    # Append + de-dupe on (url, collected_at)
+
+    # Append and deduplicate on URL (keep latest row)
     df_all = pd.concat([df_prev, df_run], ignore_index=True)
-    if {"url", "collected_at"}.issubset(df_all.columns):
-        df_all.drop_duplicates(subset=["url", "collected_at"], inplace=True)
+    if "url" in df_all.columns:
+        df_all.drop_duplicates(subset=["url"], keep="last", inplace=True)
     else:
-        df_all.drop_duplicates(inplace=True)
+        df_all.drop_duplicates(keep="last", inplace=True)
+
     # Write back
     buf = io.StringIO()
     df_all.to_csv(buf, index=False)
     s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue(), ContentType="text/csv", CacheControl="no-cache")
+    print(f"[s3] appended+dedup to s3://{bucket}/{key} rows={len(df_all)}")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -115,13 +122,13 @@ def run_once(as_of: date, cfg: AppConfig) -> int:
         all_postings.extend(lv_scraper.fetch(as_of=as_of))
 
     append_postings_to_csv(all_postings, cfg.csv_path)
-    # Append this run to S3 aggregate latest.csv (if configured)
+    # Append this run to S3 archive.csv (if configured)
     try:
         df_run = pd.DataFrame([p.to_row() for p in all_postings], columns=COLUMNS)
         if not df_run.empty:
-            append_to_s3_aggregate(df_run)
+            append_to_s3_archive(df_run)
     except Exception as e:
-        print(f"[s3] aggregate append failed: {e}")
+        print(f"[s3] archive append failed: {e}")
     return len(all_postings)
 
 
