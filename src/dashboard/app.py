@@ -16,6 +16,7 @@ try:
 except Exception:
     def st_autorefresh(*args, **kwargs):
         return None
+import time
 
 
 API_URL = st.secrets.get("API_URL") or os.getenv("API_URL", "")
@@ -59,6 +60,7 @@ S3_META_PREFIX = S3_META_PREFIX.strip("/")
 SCHEDULE_HRS = int(os.getenv("SCHEDULE_HOURS", st.secrets.get("SCHEDULE_HOURS", 12)))
 _s3_client = boto3.client("s3", region_name=AWS_REGION)
 NEXT_RUN_REFRESH_SECS = int(os.getenv("NEXT_RUN_REFRESH_SECS", st.secrets.get("NEXT_RUN_REFRESH_SECS", 36000)))  # 10h default
+DATA_REFRESH_SECS = int(os.getenv("DATA_REFRESH_SECS", 300))  # force refresh every N seconds
 
 def fetch_next_run_from_s3():
     key = f"{S3_META_PREFIX}/meta/next_run.json"
@@ -127,8 +129,8 @@ st.set_page_config(page_title="Data Scientist Jobs in Israel", layout="wide")
 st.title("Data Scientist Jobs in Israel")
 st.caption("Interactive dashboard of open positions over time")
 
-@st.cache_data(ttl=600)
-def load_data(path: str, remote_url: str, enriched_path: str) -> pd.DataFrame:
+@st.cache_data(ttl=0)
+def load_data(path: str, remote_url: str, enriched_path: str, s3_version_token: str, local_mtime_token: str, time_bucket_token: str) -> pd.DataFrame:
     # If configured, try S3 first
     if USE_S3 and S3_BUCKET:
         try:
@@ -157,18 +159,6 @@ def load_data(path: str, remote_url: str, enriched_path: str) -> pd.DataFrame:
                     break
                 except Exception:
                     df = None
-            if df is None:
-                paginator = s3.get_paginator("list_objects_v2")
-                newest_key, newest_ts = None, None
-                for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
-                    for o in page.get("Contents", []):
-                        if o["Key"].endswith(".csv") and (newest_ts is None or o["LastModified"] > newest_ts):
-                            newest_key, newest_ts = o["Key"], o["LastModified"]
-                if newest_key:
-                    obj = s3.get_object(Bucket=S3_BUCKET, Key=newest_key)
-                    df = pd.read_csv(obj["Body"])
-                else:
-                    df = pd.DataFrame()
             if not df.empty:
                 # proceed to post-processing (col parsing, enrichment merge)
                 pass
@@ -191,13 +181,14 @@ def load_data(path: str, remote_url: str, enriched_path: str) -> pd.DataFrame:
                 df = pd.read_csv(remote_url)
             except Exception:
                 return pd.DataFrame(columns=["source", "job_title", "company", "location", "url", "collected_at"])
-
     if "collected_at" in df.columns:
         df["collected_at"] = pd.to_datetime(df["collected_at"]).dt.date
-    # Ensure expected columns exist
+    # Ensure expected columns exist (add snapshot_id if missing)
     for c in ["source", "job_title", "company", "location", "url", "collected_at"]:
         if c not in df.columns:
             df[c] = None
+    if "snapshot_id" not in df.columns:
+        df["snapshot_id"] = None
     # If enriched file exists, merge in normalized columns by URL
     if os.path.exists(enriched_path):
         try:
@@ -205,7 +196,38 @@ def load_data(path: str, remote_url: str, enriched_path: str) -> pd.DataFrame:
             df = df.merge(df_en, on="url", how="left")
         except Exception:
             pass
-    return df[["source", "job_title", "company", "location", "url", "collected_at", "city_normalized", "title_normalized"] if "city_normalized" in df.columns else ["source", "job_title", "company", "location", "url", "collected_at"]]
+    base_cols = ["source", "job_title", "company", "location", "url", "collected_at"]
+    if "snapshot_id" in df.columns:
+        base_cols.append("snapshot_id")
+    if "city_normalized" in df.columns:
+        base_cols.extend(["city_normalized", "title_normalized"])
+    return df[base_cols]
+
+
+def get_data_version_tokens() -> tuple[str, str, str]:
+    # S3 version token: ETag+LastModified of first available stable key
+    s3_token = ""
+    if USE_S3 and S3_BUCKET:
+        try:
+            s3c = boto3.client("s3", region_name=AWS_REGION)
+            prefix = S3_PREFIX if S3_PREFIX.endswith("/") else (S3_PREFIX + "/")
+            for key in [f"{prefix}archive.csv", f"{prefix}latest.csv", f"{prefix}jobs_latest.csv", f"{prefix}latest/jobs.csv"]:
+                try:
+                    head = s3c.head_object(Bucket=S3_BUCKET, Key=key)
+                    s3_token = f"{key}:{head.get('ETag')}:{head.get('LastModified')}"
+                    break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    # Local mtime token
+    try:
+        local_token = str(os.path.getmtime(DATA_PATH))
+    except Exception:
+        local_token = ""
+    # Time bucket token to force refresh every N seconds
+    time_token = str(int(max(1, DATA_REFRESH_SECS) and time.time() // max(1, DATA_REFRESH_SECS)))
+    return s3_token, local_token, time_token
 
 
 # Cached model loader so the embedding model is initialized once
@@ -462,7 +484,8 @@ with st.sidebar:
         st.warning("Set API_URL in Streamlit secrets to enable fetching.")
 
 
-    df = load_data(DATA_PATH, REMOTE_CSV, ENRICHED_PATH)
+    s3_tok, local_tok, time_tok = get_data_version_tokens()
+    df = load_data(DATA_PATH, REMOTE_CSV, ENRICHED_PATH, s3_tok, local_tok, time_tok)
     # If no enriched columns present and SELF_ENRICH is enabled, compute in-memory
     if SELF_ENRICH and ("city_normalized" not in df.columns or "title_normalized" not in df.columns):
         with st.spinner("Enriching locations and titles in-memory…"):
@@ -512,11 +535,15 @@ if title_filter:
 col1, col2, col3 = st.columns(3)
 col1.metric("Total postings", len(filtered))
 col2.metric("Unique companies", filtered["company"].nunique())
-snapshots_count = (
-    filtered["snapshot_id"].nunique()
-    if "snapshot_id" in filtered.columns and filtered["snapshot_id"].notna().any()
-    else filtered["collected_at"].nunique()
-)
+# Snapshot count: unique snapshot_id (non-empty) + unique collected_at for rows missing snapshot_id
+if "snapshot_id" in filtered.columns:
+    sid_series = filtered["snapshot_id"].astype(str).str.strip()
+    mask_has_sid = sid_series.ne("") & ~sid_series.isna()
+    count_sid = sid_series[mask_has_sid].nunique()
+    count_fallback = filtered.loc[~mask_has_sid, "collected_at"].nunique() if "collected_at" in filtered.columns else 0
+    snapshots_count = int(count_sid + count_fallback)
+else:
+    snapshots_count = filtered["collected_at"].nunique()
 col3.metric("Snapshots", snapshots_count)
 
 # Distribution charts (locations % and titles pie)
@@ -548,12 +575,19 @@ if not filtered.empty:
     fig_titles = px.pie(title_counts, names="job_title", values="count", title="Titles distribution (filtered)")
     dist_col2.plotly_chart(fig_titles, use_container_width=True)
 
-# Trend over time
+# Trend over time — group by snapshot_id when present, else collected_at
 if not filtered.empty:
-    by_day = (
-        filtered.groupby("collected_at").size().reset_index(name="count").sort_values("collected_at")
+    if "snapshot_id" in filtered.columns:
+        sid = pd.to_datetime(filtered["snapshot_id"], format="%Y%m%dT%H%M%SZ", errors="coerce")
+    else:
+        sid = pd.to_datetime(pd.Series([pd.NaT] * len(filtered)))
+    cat = pd.to_datetime(filtered["collected_at"], errors="coerce")
+    key = sid.fillna(cat)
+    trend = pd.DataFrame({"snapshot_ts": key})
+    by_snap = (
+        trend.groupby("snapshot_ts").size().reset_index(name="count").dropna(subset=["snapshot_ts"]).sort_values("snapshot_ts")
     )
-    fig = px.line(by_day, x="collected_at", y="count", markers=True, title="Open positions over time")
+    fig = px.line(by_snap, x="snapshot_ts", y="count", markers=True, title="Open positions over time")
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("All postings (newest first)")
