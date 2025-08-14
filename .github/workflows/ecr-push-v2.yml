@@ -5,7 +5,7 @@ env:
   AWS_REGION: us-east-1
   AWS_ACCOUNT_ID: "954976321418"
   ECR_REPO_NAME: job-scraper
-  IMAGE_TAG: v7
+  IMAGE_TAG: v8
 
 jobs:
   build-and-push:
