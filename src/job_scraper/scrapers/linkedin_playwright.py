@@ -4,7 +4,7 @@ import re
 import time
 import json
 from datetime import date
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Set
 from tenacity import retry, stop_after_attempt, wait_exponential
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from ..models import JobPosting
@@ -337,6 +337,9 @@ class LinkedInPlaywrightScraper(ScraperBase):
         storage_state_path: Optional[str] = None,
         max_pages: int = 100,
         time_budget_sec: int = 400,
+        seen_urls: Optional[Set[str]] = None,
+        min_new: int = 10,
+        time_window: str = "r604800",
     ) -> None:
         self.email = email or os.getenv("LINKEDIN_EMAIL")
         self.password = password or os.getenv("LINKEDIN_PASSWORD")
@@ -346,6 +349,9 @@ class LinkedInPlaywrightScraper(ScraperBase):
         self.max_jobs = max_jobs
         self.max_pages = max_pages
         self.time_budget_sec = time_budget_sec
+        self.seen_urls: Set[str] = set(seen_urls or set())
+        self.min_new = min_new
+        self.time_window = time_window
         self.debug = os.getenv("DEBUG_LINKEDIN", "false").lower() == "true"
         default_state = os.path.abspath(os.path.join(os.getcwd(), "data", "linkedin_state.json"))
         state_env = os.getenv("LINKEDIN_STORAGE_STATE") or os.getenv("STORAGE_STATE")
@@ -357,153 +363,100 @@ class LinkedInPlaywrightScraper(ScraperBase):
                 "LinkedIn credentials are missing. Set LINKEDIN_EMAIL and LINKEDIN_PASSWORD in .env, or provide a storage state file."
             )
 
+    def _collect_links_via_guest_search(self, context, start: int) -> List[str]:
+        url = (
+            "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+            f"?keywords={self.query.replace(' ', '%20')}"
+            f"&location={self.location.replace(' ', '%20')}"
+            f"&f_TPR={self.time_window}&sortBy=DD&start={start}"
+        )
+        page = context.new_page()
+        page.set_default_timeout(20000)
+        page.goto(url, timeout=20000)
+        links: List[str] = []
+        for a in page.query_selector_all("a.base-card__full-link"):
+            href = a.get_attribute("href") or ""
+            if not href:
+                continue
+            if href.startswith("/"):
+                href = "https://www.linkedin.com" + href
+            href = href.split("?", 1)[0]
+            links.append(href)
+        try:
+            page.close()
+        except Exception:
+            pass
+        return links
+
     @retry(wait=wait_exponential(multiplier=1, min=1, max=6), stop=stop_after_attempt(2))
     def fetch(self, *, as_of: date) -> List[JobPosting]:
-        self._guard_creds()
+        # Guest search does not require login; storage state optional
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=self.headless)
-            if os.path.exists(self.storage_state_path):
-                context = browser.new_context(storage_state=self.storage_state_path)
-            else:
-                context = browser.new_context()
-
-            # Aggressively kill LinkedIn modal overlays on every page in this context
-            context.add_init_script("""
-(() => {
-  const kill = () => ['.top-level-modal-container','.modal__overlay','[class*="overlay"]']
-    .forEach(sel => document.querySelectorAll(sel).forEach(el => el.remove()));
-  kill();
-  setInterval(kill, 500);
-})();
-""")
-
-            page = context.new_page()
-            page.set_default_timeout(90_000)
-            # Block noisy trackers/iframes that can spawn overlays
-            page.route("**/*", lambda r: r.abort() if _should_block(r.request.url) else r.continue_())
-
-            # If we have a session, skip the login page entirely
-            if os.path.exists(self.storage_state_path):
-                try:
-                    page.goto("https://www.linkedin.com/feed/", timeout=90_000)
-                except Exception:
-                    pass
-
-            # Kill the full-screen modal overlay if it appears (checkpoint/banner)
+            context = browser.new_context()
             try:
-                page.evaluate("""() => {
-                    const a = document.querySelector('.top-level-modal-container');
-                    if (a) a.remove();
-                    const b = document.querySelector('.modal__overlay');
-                    if (b) b.remove();
-                }""")
-            except Exception:
-                pass
-
-            try:
-                if not os.path.exists(self.storage_state_path):
-                    # normal login path (first run only)
-                    page.goto("https://www.linkedin.com/login", timeout=90_000)
-                    try:
-                        page.click("button:has-text('Accept')", timeout=3_000)
-                    except Exception:
-                        pass
-                    page.fill("input#username", self.email)
-                    page.fill("input#password", self.password)
-                    page.click("button[type=submit]")
-                    page.wait_for_timeout(2_000)
-                    os.makedirs(os.path.dirname(self.storage_state_path), exist_ok=True)
-                    context.storage_state(path=self.storage_state_path)
-                    print(f"[li] saved storage state to {self.storage_state_path}")
-
-                # Build base URL with most recent first
-                base = (
-                    "https://www.linkedin.com/jobs/search/"
-                    f"?keywords={self.query.replace(' ', '%20')}"
-                    f"&location={self.location.replace(' ', '%20')}"
-                    "&sortBy=DD"
-                )
-
-                jobs: List[JobPosting] = []
-                seen_links: set[str] = set()
+                new_urls: List[str] = []
+                start = 0
                 deadline = time.time() + max(30, self.time_budget_sec)
-
+                # Page through guest search
                 for page_idx in range(max(1, self.max_pages)):
-                    if time.time() > deadline or len(jobs) >= self.max_jobs:
+                    if time.time() > deadline or len(new_urls) >= self.min_new:
                         break
-                    start = page_idx * 25
-                    page_url = f"{base}&start={start}"
-                    page.goto(page_url, timeout=90000)
-                    clear_overlays(page)
+                    batch = []
+                    try:
+                        batch = self._collect_links_via_guest_search(context, start)
+                    except Exception:
+                        batch = []
+                    if not batch:
+                        break
+                    for u in batch:
+                        if u not in self.seen_urls and u not in new_urls:
+                            new_urls.append(u)
+                            if len(new_urls) >= self.min_new:
+                                break
+                    start += 25
 
-                    # Light scroll to ensure cards render
-                    for _ in range(5):
-                        if page.query_selector_all("li.jobs-search-results__list-item, div.base-card, div.job-card-container"):
-                            break
+                # Build postings for up to max_jobs
+                jobs: List[JobPosting] = []
+                for url in new_urls[: self.max_jobs]:
+                    comp = _extract_company_from_guest_endpoint(context, url) or ""
+                    loc = _extract_location_from_guest_endpoint(context, url) or self.location
+
+                    # Try to grab title from the detail page quickly
+                    title_raw = ""
+                    page = context.new_page()
+                    page.set_default_timeout(20000)
+                    try:
+                        page.goto(url, timeout=20000)
                         try:
-                            page.evaluate("window.scrollBy(0, 800)")
+                            page.wait_for_selector(".jobs-unified-top-card, .topcard", timeout=5000)
                         except Exception:
                             pass
-                        page.wait_for_timeout(600)
-                        clear_overlays(page)
-
-                    anchors = page.query_selector_all("a.base-card__full-link, a.job-card-list__title, .job-card-container__link")
-                    urls: List[str] = []
-                    for a in anchors:
-                        href = (a.get_attribute("href") or "").strip()
-                        if not href:
-                            continue
-                        if href.startswith("/"):
-                            href = "https://www.linkedin.com" + href
-                        if "linkedin.com" in href and "/jobs/view/" in href:
-                            u = href.split("?")[0]
-                            if u not in seen_links:
-                                seen_links.add(u)
-                                urls.append(u)
-
-                    for url in urls:
-                        if time.time() > deadline or len(jobs) >= self.max_jobs:
-                            break
-                        details = context.new_page()
-                        details.set_default_timeout(30000)
+                        h1 = page.query_selector("h1.jobs-unified-top-card__job-title, h1.topcard__title")
+                        if h1:
+                            title_raw = (h1.inner_text() or "").strip()
+                        if not comp:
+                            comp = _extract_company_from_json(page) or _extract_company_from_topcard(page) or comp
+                        if not loc:
+                            loc = _extract_location_from_json(page) or _extract_location_from_topcard(page) or loc
+                    except Exception:
+                        pass
+                    finally:
                         try:
-                            details.goto(url, timeout=30000)
-                            clear_overlays(details)
-                            try:
-                                details.wait_for_selector(".jobs-unified-top-card, .topcard", timeout=5000)
-                            except Exception:
-                                pass
+                            page.close()
+                        except Exception:
+                            pass
 
-                            # Title
-                            title_raw = ""
-                            h1 = details.query_selector("h1.jobs-unified-top-card__job-title, h1.topcard__title")
-                            if h1:
-                                title_raw = (h1.inner_text() or "").strip()
-
-                            # Company & location: prefer JSON, then topcard; guest endpoint as fallback
-                            company = _extract_company_from_json(details) or _extract_company_from_topcard(details)
-                            loc = _extract_location_from_json(details) or _extract_location_from_topcard(details)
-
-                            if not company:
-                                company = _extract_company_from_guest_endpoint(context, url) or ""
-                            if not loc:
-                                loc = _extract_location_from_guest_endpoint(context, url) or ""
-
-                            jobs.append(
-                                JobPosting(
-                                    source="LinkedIn (Playwright)",
-                                    job_title=_normalize_title(title_raw) or "",
-                                    company=(company or "").strip(),
-                                    location=loc or self.location,
-                                    url=url,
-                                    collected_at=as_of,
-                                )
-                            )
-                        finally:
-                            try:
-                                details.close()
-                            except Exception:
-                                pass
+                    jobs.append(
+                        JobPosting(
+                            source="LinkedIn (Playwright)",
+                            job_title=_normalize_title(title_raw) or "",
+                            company=(comp or "").strip(),
+                            location=loc or self.location,
+                            url=url,
+                            collected_at=as_of,
+                        )
+                    )
 
                 return jobs
             finally:
