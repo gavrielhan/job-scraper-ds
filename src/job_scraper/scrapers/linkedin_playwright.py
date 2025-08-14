@@ -335,6 +335,8 @@ class LinkedInPlaywrightScraper(ScraperBase):
         headless: bool = True,
         max_jobs: int = 60,
         storage_state_path: Optional[str] = None,
+        max_pages: int = 100,
+        time_budget_sec: int = 400,
     ) -> None:
         self.email = email or os.getenv("LINKEDIN_EMAIL")
         self.password = password or os.getenv("LINKEDIN_PASSWORD")
@@ -342,6 +344,8 @@ class LinkedInPlaywrightScraper(ScraperBase):
         self.location = location
         self.headless = headless
         self.max_jobs = max_jobs
+        self.max_pages = max_pages
+        self.time_budget_sec = time_budget_sec
         self.debug = os.getenv("DEBUG_LINKEDIN", "false").lower() == "true"
         default_state = os.path.abspath(os.path.join(os.getcwd(), "data", "linkedin_state.json"))
         state_env = os.getenv("LINKEDIN_STORAGE_STATE") or os.getenv("STORAGE_STATE")
@@ -412,84 +416,94 @@ class LinkedInPlaywrightScraper(ScraperBase):
                     context.storage_state(path=self.storage_state_path)
                     print(f"[li] saved storage state to {self.storage_state_path}")
 
-                search_url = (
-                    "https://www.linkedin.com/jobs/search/?keywords="
-                    + self.query.replace(" ", "%20")
-                    + "&location="
-                    + self.location.replace(" ", "%20")
+                # Build base URL with most recent first
+                base = (
+                    "https://www.linkedin.com/jobs/search/"
+                    f"?keywords={self.query.replace(' ', '%20')}"
+                    f"&location={self.location.replace(' ', '%20')}"
+                    "&sortBy=DD"
                 )
-                page.goto(search_url, timeout=90000)
-                clear_overlays(page)
-
-                # Load more results without clicking anything
-                for _ in range(12):
-                    try:
-                        page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-                    except Exception:
-                        pass
-                    page.wait_for_timeout(800)
-                    clear_overlays(page)
-
-                # Collect job links from list DOM
-                anchors = page.query_selector_all("a.base-card__full-link, a.job-card-list__title, .job-card-container__link")
-                urls: List[str] = []
-                for a in anchors:
-                    href = (a.get_attribute("href") or "").strip()
-                    if not href:
-                        continue
-                    if href.startswith("/"):
-                        href = "https://www.linkedin.com" + href
-                    if "linkedin.com" in href and "/jobs/view/" in href:
-                        urls.append(href.split("?")[0])
-
-                # Deduplicate while preserving order
-                seen: set[str] = set()
-                urls = [u for u in urls if not (u in seen or seen.add(u))]
 
                 jobs: List[JobPosting] = []
-                for url in urls:
-                    if len(jobs) >= self.max_jobs:
+                seen_links: set[str] = set()
+                deadline = time.time() + max(30, self.time_budget_sec)
+
+                for page_idx in range(max(1, self.max_pages)):
+                    if time.time() > deadline or len(jobs) >= self.max_jobs:
                         break
-                    details = context.new_page()
-                    details.set_default_timeout(30000)
-                    try:
-                        details.goto(url, timeout=30000)
-                        clear_overlays(details)
+                    start = page_idx * 25
+                    page_url = f"{base}&start={start}"
+                    page.goto(page_url, timeout=90000)
+                    clear_overlays(page)
+
+                    # Light scroll to ensure cards render
+                    for _ in range(5):
+                        if page.query_selector_all("li.jobs-search-results__list-item, div.base-card, div.job-card-container"):
+                            break
                         try:
-                            details.wait_for_selector(".jobs-unified-top-card, .topcard", timeout=5000)
+                            page.evaluate("window.scrollBy(0, 800)")
                         except Exception:
                             pass
+                        page.wait_for_timeout(600)
+                        clear_overlays(page)
 
-                        # Title
-                        title_raw = ""
-                        h1 = details.query_selector("h1.jobs-unified-top-card__job-title, h1.topcard__title")
-                        if h1:
-                            title_raw = (h1.inner_text() or "").strip()
+                    anchors = page.query_selector_all("a.base-card__full-link, a.job-card-list__title, .job-card-container__link")
+                    urls: List[str] = []
+                    for a in anchors:
+                        href = (a.get_attribute("href") or "").strip()
+                        if not href:
+                            continue
+                        if href.startswith("/"):
+                            href = "https://www.linkedin.com" + href
+                        if "linkedin.com" in href and "/jobs/view/" in href:
+                            u = href.split("?")[0]
+                            if u not in seen_links:
+                                seen_links.add(u)
+                                urls.append(u)
 
-                        # Company & location: prefer JSON, then topcard; guest endpoint as fallback
-                        company = _extract_company_from_json(details) or _extract_company_from_topcard(details)
-                        loc = _extract_location_from_json(details) or _extract_location_from_topcard(details)
+                    for url in urls:
+                        if time.time() > deadline or len(jobs) >= self.max_jobs:
+                            break
+                        details = context.new_page()
+                        details.set_default_timeout(30000)
+                        try:
+                            details.goto(url, timeout=30000)
+                            clear_overlays(details)
+                            try:
+                                details.wait_for_selector(".jobs-unified-top-card, .topcard", timeout=5000)
+                            except Exception:
+                                pass
 
-                        if not company:
-                            company = _extract_company_from_guest_endpoint(context, url) or ""
-                        if not loc:
-                            loc = _extract_location_from_guest_endpoint(context, url) or ""
+                            # Title
+                            title_raw = ""
+                            h1 = details.query_selector("h1.jobs-unified-top-card__job-title, h1.topcard__title")
+                            if h1:
+                                title_raw = (h1.inner_text() or "").strip()
 
-                        jobs.append(
-                            JobPosting(
-                                source="LinkedIn (Playwright)",
-                                job_title=_normalize_title(title_raw) or "",
-                                company=(company or "").strip(),
-                                location=loc or self.location,
-                                url=url,
-                                collected_at=as_of,
+                            # Company & location: prefer JSON, then topcard; guest endpoint as fallback
+                            company = _extract_company_from_json(details) or _extract_company_from_topcard(details)
+                            loc = _extract_location_from_json(details) or _extract_location_from_topcard(details)
+
+                            if not company:
+                                company = _extract_company_from_guest_endpoint(context, url) or ""
+                            if not loc:
+                                loc = _extract_location_from_guest_endpoint(context, url) or ""
+
+                            jobs.append(
+                                JobPosting(
+                                    source="LinkedIn (Playwright)",
+                                    job_title=_normalize_title(title_raw) or "",
+                                    company=(company or "").strip(),
+                                    location=loc or self.location,
+                                    url=url,
+                                    collected_at=as_of,
+                                )
                             )
-                        )
-                    finally:
-                        try:
-                            details.close()
-                        except Exception:
-                            pass
+                        finally:
+                            try:
+                                details.close()
+                            except Exception:
+                                pass
 
                 return jobs
             finally:

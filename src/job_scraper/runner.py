@@ -1,7 +1,7 @@
 from __future__ import annotations
 import argparse
-from datetime import date, datetime
-from typing import List
+from datetime import date, datetime, timedelta
+from typing import List, Set
 import os
 import io
 import pandas as pd
@@ -56,6 +56,26 @@ def append_to_s3_archive(df_run: pd.DataFrame) -> None:
     print(f"[s3] appended+dedup to s3://{bucket}/{key} rows={len(df_all)}")
 
 
+def load_seen_urls_from_s3() -> Set[str]:
+    bucket = os.getenv("OUTPUT_BUCKET")
+    prefix = os.getenv("OUTPUT_PREFIX", "snapshots/")
+    seen: Set[str] = set()
+    if not bucket:
+        return seen
+    if prefix and not prefix.endswith("/"):
+        prefix = prefix + "/"
+    key = f"{prefix}archive.csv"
+    s3 = boto3.client("s3")
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        df_prev = pd.read_csv(io.BytesIO(obj["Body"].read()))  # type: ignore[arg-type]
+        if "url" in df_prev.columns:
+            seen = set(df_prev["url"].dropna().astype(str).tolist())
+    except ClientError:
+        pass
+    return seen
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run job scrapers and append to CSV")
     parser.add_argument("--as-of", dest="as_of", type=str, default=None, help="ISO date to stamp collection (YYYY-MM-DD). Defaults to today.")
@@ -76,6 +96,9 @@ def run_once(as_of: date, cfg: AppConfig) -> int:
     # Unique snapshot id per run (UTC timestamp)
     snapshot_id = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
+    # Load seen URLs to skip duplicates during scraping
+    seen_urls: Set[str] = load_seen_urls_from_s3()
+
     # LinkedIn via SerpAPI (optional)
     linkedin_cfg = (sources_cfg.get("linkedin_serpapi") or {})
     if linkedin_cfg.get("enabled"):
@@ -84,9 +107,11 @@ def run_once(as_of: date, cfg: AppConfig) -> int:
             query=linkedin_cfg.get("query", "Data Scientist"),
             location=linkedin_cfg.get("location", "Israel"),
         )
-        all_postings.extend(scraper.fetch(as_of=as_of))
+        sp_posts = [p for p in scraper.fetch(as_of=as_of) if p.url not in seen_urls]
+        all_postings.extend(sp_posts)
+        seen_urls.update(p.url for p in sp_posts)
 
-    # LinkedIn via SearchApi.io (optional)
+    # LinkedIn via SearchApi.io (optional) — skip URLs already seen
     searchapi_cfg = (sources_cfg.get("searchapi_linkedin") or {})
     if searchapi_cfg.get("enabled"):
         sa_scraper = SearchApiLinkedInScraper(
@@ -94,34 +119,46 @@ def run_once(as_of: date, cfg: AppConfig) -> int:
             query=searchapi_cfg.get("query", "Data Scientist"),
             location=searchapi_cfg.get("location", "Israel"),
         )
-        all_postings.extend(sa_scraper.fetch(as_of=as_of))
+        sa_posts = [p for p in sa_scraper.fetch(as_of=as_of) if p.url not in seen_urls]
+        all_postings.extend(sa_posts)
+        seen_urls.update(p.url for p in sa_posts)
 
-    # LinkedIn via Playwright (optional, requires credentials)
+    # LinkedIn via Playwright (optional, requires credentials) with pagination/time budget and URL skip
     li_pw_cfg = (sources_cfg.get("linkedin_playwright") or {})
     if li_pw_cfg.get("enabled"):
         headless = str(li_pw_cfg.get("headless", os.getenv("LINKEDIN_HEADLESS", "true"))).lower() == "true"
         max_jobs = int(li_pw_cfg.get("max_jobs", os.getenv("LINKEDIN_MAX_JOBS", 60)))
+        max_pages = int(li_pw_cfg.get("max_pages", 8))
+        time_budget_sec = int(li_pw_cfg.get("time_budget_sec", 300))
         li_pw = LinkedInPlaywrightScraper(
             query=li_pw_cfg.get("query", "Data Scientist"),
             location=li_pw_cfg.get("location", "Israel"),
             headless=headless,
             max_jobs=max_jobs,
+            max_pages=max_pages,
+            time_budget_sec=time_budget_sec,
         )
-        all_postings.extend(li_pw.fetch(as_of=as_of))
+        li_posts = [p for p in li_pw.fetch(as_of=as_of) if p.url not in seen_urls]
+        all_postings.extend(li_posts)
+        seen_urls.update(p.url for p in li_posts)
 
     # Greenhouse
     greenhouse_cfg = (sources_cfg.get("greenhouse") or {})
     if greenhouse_cfg.get("enabled"):
         boards = greenhouse_cfg.get("companies") or []
         gh_scraper = GreenhouseScraper(boards=boards, title_keywords=greenhouse_cfg.get("title_keywords"))
-        all_postings.extend(gh_scraper.fetch(as_of=as_of))
+        gh_posts = [p for p in gh_scraper.fetch(as_of=as_of) if p.url not in seen_urls]
+        all_postings.extend(gh_posts)
+        seen_urls.update(p.url for p in gh_posts)
 
     # Lever
     lever_cfg = (sources_cfg.get("lever") or {})
     if lever_cfg.get("enabled"):
         companies = lever_cfg.get("companies") or []
         lv_scraper = LeverScraper(companies=companies, title_keywords=lever_cfg.get("title_keywords"))
-        all_postings.extend(lv_scraper.fetch(as_of=as_of))
+        lv_posts = [p for p in lv_scraper.fetch(as_of=as_of) if p.url not in seen_urls]
+        all_postings.extend(lv_posts)
+        seen_urls.update(p.url for p in lv_posts)
 
     append_postings_to_csv(all_postings, cfg.csv_path, snapshot_id=snapshot_id)
     # Append this run to S3 archive.csv (if configured)
