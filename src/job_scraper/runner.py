@@ -73,6 +73,8 @@ def run_once(as_of: date, cfg: AppConfig) -> int:
     sources_cfg = load_sources_config(cfg)
 
     all_postings: List[JobPosting] = []
+    # Unique snapshot id per run (UTC timestamp)
+    snapshot_id = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
     # LinkedIn via SerpAPI (optional)
     linkedin_cfg = (sources_cfg.get("linkedin_serpapi") or {})
@@ -121,10 +123,11 @@ def run_once(as_of: date, cfg: AppConfig) -> int:
         lv_scraper = LeverScraper(companies=companies, title_keywords=lever_cfg.get("title_keywords"))
         all_postings.extend(lv_scraper.fetch(as_of=as_of))
 
-    append_postings_to_csv(all_postings, cfg.csv_path)
+    append_postings_to_csv(all_postings, cfg.csv_path, snapshot_id=snapshot_id)
     # Append this run to S3 archive.csv (if configured)
     try:
         df_run = pd.DataFrame([p.to_row() for p in all_postings], columns=COLUMNS)
+        df_run["snapshot_id"] = snapshot_id
         if not df_run.empty:
             append_to_s3_archive(df_run)
     except Exception as e:

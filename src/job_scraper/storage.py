@@ -1,11 +1,11 @@
 from __future__ import annotations
 import os
 import pandas as pd
-from typing import List
+from typing import List, Optional
 from .models import JobPosting
 
 
-COLUMNS = ["source", "job_title", "company", "location", "url", "collected_at"]
+COLUMNS = ["source", "job_title", "company", "location", "url", "collected_at", "snapshot_id"]
 
 
 def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -19,10 +19,12 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[COLUMNS]
 
 
-def append_postings_to_csv(postings: List[JobPosting], csv_path: str) -> None:
+def append_postings_to_csv(postings: List[JobPosting], csv_path: str, snapshot_id: Optional[str] = None) -> None:
     if not postings:
         return
-    new_df = pd.DataFrame([p.to_row() for p in postings], columns=COLUMNS)
+    new_df = pd.DataFrame([p.to_row() for p in postings], columns=[c for c in COLUMNS if c != "snapshot_id"])  # base columns
+    if snapshot_id is not None:
+        new_df["snapshot_id"] = snapshot_id
     if os.path.exists(csv_path):
         existing = pd.read_csv(csv_path)
         existing = _ensure_columns(existing)
@@ -37,4 +39,9 @@ def append_postings_to_csv(postings: List[JobPosting], csv_path: str) -> None:
         )
         combined.to_csv(csv_path, index=False)
     else:
+        # Ensure all expected columns
+        for c in COLUMNS:
+            if c not in new_df.columns:
+                new_df[c] = None
+        new_df = new_df[COLUMNS]
         new_df.to_csv(csv_path, index=False) 

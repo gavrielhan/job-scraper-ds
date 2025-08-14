@@ -512,7 +512,12 @@ if title_filter:
 col1, col2, col3 = st.columns(3)
 col1.metric("Total postings", len(filtered))
 col2.metric("Unique companies", filtered["company"].nunique())
-col3.metric("Snapshots", filtered["collected_at"].nunique())
+snapshots_count = (
+    filtered["snapshot_id"].nunique()
+    if "snapshot_id" in filtered.columns and filtered["snapshot_id"].notna().any()
+    else filtered["collected_at"].nunique()
+)
+col3.metric("Snapshots", snapshots_count)
 
 # Distribution charts (locations % and titles pie)
 if not filtered.empty:
